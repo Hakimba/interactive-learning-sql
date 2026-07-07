@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SQL Sandbox — apprendre le SQL visuellement</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="appbar">
+    <div class="brand">
+      <span class="logo">▚</span>
+      <span class="brand-name">SQL&nbsp;Sandbox</span>
+      <span class="brand-sub">apprendre le SQL en le voyant</span>
+    </div>
+    <div class="appbar-right">
+      <span class="incr">incrément 1 · SELECT / FROM / WHERE</span>
+      <button class="btn ghost" id="themeToggle" aria-label="Basculer le thème">◐</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ================= PANNEAU GAUCHE : TABLES ================= -->
+    <section class="panel panel-left">
+      <div class="panel-head">
+        <strong class="panel-title">Tables</strong>
+        <div class="left-tools">
+          <button class="btn primary" id="btnAddTable">+ Table</button>
+          <select class="btn select" id="schemaPicker" aria-label="Charger un schéma">
+            <option value="">Charger un schéma…</option>
+          </select>
+          <div class="segmented" id="viewToggle" role="group" aria-label="Mode de visualisation">
+            <button class="seg active" data-view="schema">Schéma</button>
+            <button class="seg" data-view="data">Données</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <!-- Vue schéma : canvas pannable/zoomable -->
+        <div class="schema-view" id="schemaView">
+          <div class="schema-hint" id="schemaHint">
+            Aucune table. Crée-en une avec <b>+ Table</b> ou charge un <b>schéma</b>.
+          </div>
+          <div class="stage" id="stage">
+            <svg class="links" id="links"></svg>
+            <div class="cards" id="schemaCards"></div>
+          </div>
+          <div class="zoom-controls">
+            <button class="btn ghost" id="zoomOut">−</button>
+            <span id="zoomLabel">100%</span>
+            <button class="btn ghost" id="zoomIn">+</button>
+            <button class="btn ghost" id="zoomReset">recentrer</button>
+          </div>
+        </div>
+
+        <!-- Vue données : onglets + grille -->
+        <div class="data-view hidden" id="dataView">
+          <div class="table-tabs" id="tableTabs"></div>
+          <div class="data-grid-wrap" id="dataGridWrap"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= PANNEAU DROIT : ÉVALUATEUR ================= -->
+    <section class="panel panel-right">
+      <div class="panel-head">
+        <strong class="panel-title">Évaluateur</strong>
+        <div class="constructs" id="constructs">
+          <button class="chip" data-snippet="select">SELECT</button>
+          <button class="chip" data-snippet="from">FROM</button>
+          <button class="chip" data-snippet="where">WHERE</button>
+          <button class="chip" data-snippet="orderby">ORDER BY</button>
+          <button class="chip" data-snippet="limit">LIMIT</button>
+        </div>
+      </div>
+
+      <div class="editor-wrap">
+        <textarea id="sqlInput" spellcheck="false" autocomplete="off"
+          placeholder="SELECT * FROM clients WHERE ville = 'Paris'"></textarea>
+      </div>
+
+      <div class="eval-bar">
+        <label class="switch">
+          <input type="checkbox" id="stepMode" />
+          <span>Évaluation itérative</span>
+        </label>
+        <span class="status" id="status"></span>
+      </div>
+
+      <!-- Contrôles pas-à-pas (visibles en mode itératif) -->
+      <div class="step-controls hidden" id="stepControls">
+        <button class="btn ghost" id="stepReset" title="Recommencer">⏮</button>
+        <button class="btn ghost" id="stepPrev" title="Précédent">◀</button>
+        <button class="btn primary" id="stepPlay" title="Lecture auto">▶ Lire</button>
+        <button class="btn ghost" id="stepNext" title="Suivant">▶</button>
+        <button class="btn ghost" id="stepEnd" title="Aller à la fin">⏭</button>
+        <span class="step-label" id="stepLabel"></span>
+      </div>
+
+      <div class="result-area" id="resultArea">
+        <div class="placeholder">Écris une requête pour voir le résultat en temps réel.</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ================= MODALE : créer / éditer une table ================= -->
+  <div class="modal-backdrop hidden" id="tableModal">
+    <div class="modal">
+      <div class="modal-head">
+        <strong id="modalTitle">Nouvelle table</strong>
+        <button class="btn ghost" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="field">
+          <span>Nom de la table</span>
+          <input type="text" id="tableName" placeholder="clients" autocomplete="off" />
+        </label>
+        <div class="cols-editor">
+          <div class="cols-editor-head">
+            <span class="ce-col">Colonne</span>
+            <span class="ce-type">Type</span>
+            <span class="ce-pk">PK</span>
+            <span class="ce-del"></span>
+          </div>
+          <div id="colsList"></div>
+          <button class="btn ghost small" id="addColBtn">+ colonne</button>
+        </div>
+        <div class="modal-error" id="modalError"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="modalCancel">Annuler</button>
+        <button class="btn primary" id="modalSave">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/sql.js"></script>
+  <script src="js/datagen.js"></script>
+  <script src="js/presets.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

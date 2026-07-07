@@ -1,0 +1,20 @@
+# Dépendances
+node_modules/
+
+# Sorties de build
+dist/
+engine/_build/
+engine/_opam/
+
+# Bundle du moteur généré (régénéré par ./build-engine.sh)
+app/public/sql_engine.js
+
+# OCaml
+*.install
+.merlin
+_opam/
+
+# Logs / divers
+*.log
+npm-debug.log*
+.DS_Store
