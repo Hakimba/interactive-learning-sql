@@ -139,8 +139,48 @@ let props () =
        let np = qcount (Printf.sprintf "SELECT * FROM t WHERE NOT b > %d" k) db in
        p >= 0 && np >= 0 && p + np = List.length rows))
 
+(* ---------------- Tests JOIN ---------------- *)
+let clients2 =
+  tbl "clients" [ col "id" "INTEGER"; col "nom" "VARCHAR" ]
+    [ [ ("id", VInt 1); ("nom", VStr "Alice") ];
+      [ ("id", VInt 2); ("nom", VStr "Bob") ];
+      [ ("id", VInt 3); ("nom", VStr "Chloé") ] ]   (* Chloé n'a pas de commande *)
+
+let commandes2 =
+  tbl "commandes" [ col "id" "INTEGER"; col "client_id" "INTEGER"; col "montant" "INTEGER" ]
+    [ [ ("id", VInt 10); ("client_id", VInt 1); ("montant", VInt 100) ];  (* Alice *)
+      [ ("id", VInt 11); ("client_id", VInt 1); ("montant", VInt 50) ];   (* Alice (fan-out) *)
+      [ ("id", VInt 12); ("client_id", VInt 2); ("montant", VInt 75) ];   (* Bob *)
+      [ ("id", VInt 13); ("client_id", VInt 99); ("montant", VInt 20) ] ] (* client inexistant *)
+
+let jdb = mkdb [ clients2; commandes2 ]
+let jn sql =
+  match Engine.run sql jdb with
+  | Ok r -> List.length r.Semantics.out_rows
+  | Error (m, _) -> incr failures; Printf.printf "JOIN FAIL %s -> %s\n" sql m; -1
+let jerr sql = match Engine.run sql jdb with Error _ -> true | _ -> false
+
+let golden_joins () =
+  Printf.printf "\n== Golden JOIN ==\n";
+  let on = "ON clients.id = commandes.client_id" in
+  check "INNER JOIN (fan-out)" (jn (Printf.sprintf "SELECT nom, montant FROM clients JOIN commandes %s" on) = 3);
+  check "LEFT JOIN (orphelin gardé)" (jn (Printf.sprintf "SELECT nom, montant FROM clients LEFT JOIN commandes %s" on) = 4);
+  check "RIGHT JOIN" (jn (Printf.sprintf "SELECT nom, montant FROM clients RIGHT JOIN commandes %s" on) = 4);
+  check "FULL JOIN" (jn (Printf.sprintf "SELECT nom, montant FROM clients FULL JOIN commandes %s" on) = 5);
+  check "CROSS JOIN" (jn "SELECT nom, montant FROM clients CROSS JOIN commandes" = 12);
+  check "virgule = CROSS" (jn "SELECT nom, montant FROM clients, commandes" = 12);
+  check "alias de table" (jn "SELECT c.nom, o.montant FROM clients c JOIN commandes o ON c.id = o.client_id" = 3);
+  check "colonne ambiguë -> erreur" (jerr (Printf.sprintf "SELECT id FROM clients JOIN commandes %s" on));
+  check "colonne qualifiée ok" (jn (Printf.sprintf "SELECT clients.id FROM clients JOIN commandes %s" on) = 3);
+  check "WHERE après JOIN" (jn (Printf.sprintf "SELECT nom FROM clients JOIN commandes %s WHERE montant > 60" on) = 2);
+  (* LEFT JOIN : Chloé apparaît avec un montant NULL *)
+  let left = match Engine.run (Printf.sprintf "SELECT nom, montant FROM clients LEFT JOIN commandes %s" on) jdb with
+    | Ok r -> r.Semantics.out_rows | _ -> [] in
+  check "LEFT JOIN remplit NULL" (List.exists (function [ VStr "Chloé"; VNull ] -> true | _ -> false) left)
+
 let () =
   golden ();
+  golden_joins ();
   props ();
   Printf.printf "\n%s : %d échec(s)\n" (if !failures = 0 then "SUCCÈS" else "ÉCHEC") !failures;
   if !failures > 0 then exit 1

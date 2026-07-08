@@ -4,9 +4,10 @@
 type arith = Add | Sub | Mul | Div | Mod
 type cmp = Eq | Neq | Lt | Le | Gt | Ge
 
-(* Expressions : s'évaluent en une VALEUR. *)
+(* Expressions : s'évaluent en une VALEUR.
+   Une colonne peut être qualifiée par un alias/table : `a.x` = Col (Some "a", "x"). *)
 type expr =
-  | Col of string
+  | Col of string option * string
   | Lit of Value.value
   | Neg of expr
   | Arith of arith * expr * expr
@@ -28,10 +29,22 @@ type dir = Asc | Desc
 type sel_item = { e : expr; alias : string option }
 type select_list = Star | Items of sel_item list
 
+(* Jointures. Le prédicat ON est une condition quelconque (pas seulement une égalité de clés).
+   CROSS JOIN (et la virgule) n'ont pas de ON. *)
+type join_kind = Inner | Left | Right | Full | Cross
+type join_clause = {
+  jtable : string;
+  jalias : string option;
+  jkind : join_kind;
+  jon : cond option;
+}
+
 type query = {
   distinct : bool;
   sel : select_list;
   from : string;
+  from_alias : string option;
+  joins : join_clause list;
   where : cond option;
   order_by : (expr * dir) list;
   limit : int option;
@@ -40,7 +53,7 @@ type query = {
 
 (* Libellé d'affichage d'une expression (nom de colonne de sortie par défaut). *)
 let rec label_of_expr = function
-  | Col c -> c
+  | Col (_, c) -> c
   | Lit v -> Value.to_display v
   | Func (name, _) -> name ^ "(…)"
   | Neg e -> "-" ^ label_of_expr e

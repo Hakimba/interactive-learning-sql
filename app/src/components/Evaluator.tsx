@@ -5,11 +5,14 @@
 //  • Pas à pas: VERROUILLÉ. Même mécanique, cumulée clause par clause (WHERE→ORDER→LIMIT→…).
 import { sql, setSql, resultOnly, rightTab, stepSql, stepIndex, enterStep, database, bindEditor, noteCursor } from "../state";
 import { analyze } from "../analyze";
+import { computeJoin } from "../join";
 import type { ClauseKey } from "../clauses";
 import { Grid } from "./Grid";
+import { JoinPreview } from "./JoinView";
+import { JoinStep } from "./JoinStep";
 
 const SNIPPETS: Record<string, string> = {
-  SELECT: "SELECT ", FROM: " FROM ", WHERE: " WHERE ", "ORDER BY": " ORDER BY ", LIMIT: " LIMIT 10",
+  SELECT: "SELECT ", FROM: " FROM ", JOIN: " JOIN  ON ", WHERE: " WHERE ", "ORDER BY": " ORDER BY ", LIMIT: " LIMIT 10",
 };
 const range = (n: number) => Array.from({ length: n }, (_, i) => i);
 const CLAUSE_LABEL: Record<ClauseKey, string> = {
@@ -54,6 +57,12 @@ function PreviewView() {
   );
 }
 
+function EditorResults() {
+  const jd = computeJoin(sql.value, database.value);
+  if (jd) return <JoinPreview data={jd} />;
+  return <PreviewView />;
+}
+
 function EditorTab() {
   return (
     <>
@@ -76,7 +85,7 @@ function EditorTab() {
         </button>
         <button class="btn" onClick={enterStep} title="Évaluer pas à pas (verrouillé)">Pas à pas →</button>
       </div>
-      <div class="result-area"><PreviewView /></div>
+      <div class="result-area"><EditorResults /></div>
     </>
   );
 }
@@ -84,6 +93,8 @@ function EditorTab() {
 /* ---------------- Onglet Pas à pas (verrouillé) ---------------- */
 function StepTab() {
   const text = stepSql.value;
+  const jd = computeJoin(text, database.value);
+  if (jd) return <JoinStep data={jd} />; // pas-à-pas dédié aux jointures (nested-loop)
   const a = analyze(text, database.value);
   if (!a.ok) return <div class="placeholder">{a.note}</div>;
   const steps = a.seg.evalOrder;
@@ -130,7 +141,7 @@ function StepTab() {
 
   return (
     <>
-      <div class="lock-bar">🔒 requête figée · lecture seule
+      <div class="lock-bar">
         <button class="btn ghost small" onClick={() => (rightTab.value = "editor")}>← revenir à l'éditeur</button>
       </div>
       <div class="proof-query">

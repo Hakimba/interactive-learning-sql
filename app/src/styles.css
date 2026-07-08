@@ -65,6 +65,32 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-family: var
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
 .dot-num { background: var(--num); } .dot-text { background: var(--accent); } .dot-bool { background: #8a7fe0; } .dot-time { background: #5aa9e0; } .dot-id { background: #c56cc0; }
 
+/* vue Schéma = map (DBeaver / UML) */
+.schema-map { position: relative; height: 100%; min-height: 440px; overflow: hidden; border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface); background-image: radial-gradient(var(--hairline) 1px, transparent 1px); background-size: 22px 22px; cursor: grab; user-select: none; }
+.schema-map:active { cursor: grabbing; }
+.stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.rels { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.rel { stroke: var(--accent); stroke-width: 1.6; }
+.reldot { fill: var(--accent); }
+.reljoin { pointer-events: auto; cursor: pointer; }
+.reljoin:hover .rel { stroke-width: 2.6; }
+.reljoin-bg { fill: var(--surface); stroke: var(--accent); stroke-width: 1.2; }
+.reljoin:hover .reljoin-bg { fill: var(--accent-bg); }
+.reljoin-txt { fill: var(--accent); font-size: 12px; font-weight: 700; pointer-events: none; }
+.map-hint { position: absolute; top: 10px; left: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 3px 8px; pointer-events: none; }
+.node { position: absolute; background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 9px; box-shadow: var(--shadow); overflow: hidden; }
+.node-head { height: 30px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; background: var(--surface-2); border-bottom: 1px solid var(--hairline); cursor: grab; }
+.node-head:active { cursor: grabbing; }
+.node-col { height: 24px; box-sizing: border-box; display: flex; align-items: center; gap: 7px; padding: 0 10px; font-size: 12.5px; border-top: 1px solid var(--hairline); }
+.node-col:first-of-type { border-top: none; }
+.node-col.clickable { cursor: pointer; }
+.node-col.clickable:hover { background: var(--accent-bg); }
+.node-col.sel { background: var(--accent-bg); box-shadow: inset 2px 0 0 var(--accent); }
+.nc-name { flex: 1; }
+.nc-type { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint); }
+.zoom-controls { position: absolute; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 8px; padding: 4px 6px; box-shadow: var(--shadow); }
+.zoom-controls .zlabel { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); min-width: 38px; text-align: center; }
+
 /* données */
 .data-view { display: flex; flex-direction: column; gap: 10px; }
 .table-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -164,7 +190,6 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .rtabs { margin-left: auto; display: inline-flex; border: 1px solid var(--hairline-2); border-radius: 8px; overflow: hidden; }
 .constructs.bar { margin: 10px 14px 0; margin-left: 14px; }
 .lock-bar { display: flex; align-items: center; gap: 12px; margin: 12px 14px 0; padding: 6px 12px; font-size: 12px; font-family: var(--font-mono); color: var(--ink-soft); background: var(--surface-2); border: 1px dashed var(--hairline-2); border-radius: 8px; }
-.lock-bar .btn { margin-left: auto; }
 .proof-query { margin: 12px 14px 0; }
 .step-controls { padding: 10px 14px 0; }
 /* lignes coupées par LIMIT/OFFSET */
@@ -180,3 +205,57 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .grid tbody tr.folded .num, .grid tbody tr.folded .null, .grid tbody tr.folded .bool { font-size: 0; }
 /* accordéon horizontal : les colonnes non projetées disparaissent (projection SELECT) */
 .grid th.col-folded, .grid td.col-folded { display: none; }
+
+/* ---- vue de jointure ---- */
+.join-view { display: flex; flex-direction: column; }
+.jv-tables { display: flex; gap: 10px; align-items: flex-start; overflow-x: auto; }
+.jv-op { align-self: center; font-size: 20px; color: var(--accent); padding: 0 2px; }
+.jt { flex: 1 1 0; min-width: 0; }
+.jt-name { font-family: var(--font-mono); font-size: 12px; font-weight: 640; margin-bottom: 4px; }
+.jrow { transition: background .2s ease, box-shadow .2s ease; }
+.jrow.drop { opacity: 0.32; }
+.jrow.orphan { background: color-mix(in srgb, var(--fail) 7%, transparent); }
+/* clignotement des lignes associées (~1 s) */
+.jrow.flash { background: var(--accent-bg); box-shadow: inset 0 0 0 2px var(--accent); }
+/* nested-loop : ligne courante / à venir / traitée */
+.jrow.current { background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); }
+.jrow.pending { opacity: 0.4; }
+/* étape JOIN : groupes de colonnes par table d'origine (A / B) */
+.group-row th.grp { text-align: left; font-family: var(--font-mono); font-size: 11px; padding: 5px 10px; }
+.group-row th.gA { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); border-right: 1px solid var(--surface); }
+.group-row th.gB { background: color-mix(in srgb, var(--num) 16%, transparent); color: var(--num); }
+.grid thead tr:not(.group-row) th.gA { border-bottom: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+.grid thead tr:not(.group-row) th.gB { border-bottom: 2px solid color-mix(in srgb, var(--num) 45%, transparent); }
+.join-cap { display: flex; align-items: center; gap: 10px; margin: 10px 14px 0; font-family: var(--font-mono); font-size: 13px; color: var(--ink-soft); }
+.pill { padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+.pill.gA { color: var(--accent); background: var(--accent-bg); border: 1px solid var(--accent); }
+.pill.gB { color: var(--num); background: color-mix(in srgb, var(--num) 14%, transparent); border: 1px solid var(--num); }
+/* carré cliquable dans la gouttière */
+.jmark { font-family: var(--font-mono); font-size: 12px; line-height: 1; width: 20px; height: 20px;
+  border: 1px solid var(--hairline-2); border-radius: 5px; background: var(--surface); cursor: pointer; padding: 0; }
+.jmark.matched { color: var(--accent); border-color: var(--accent); }
+.jmark.matched:hover { background: var(--accent-bg); }
+.jmark.orphan { color: var(--ink-soft); }
+.jmark.drop { color: var(--ink-faint); cursor: default; }
+.jv-legend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--ink-soft); }
+.jv-legend .jmark { pointer-events: none; }
+.jv-legend .lg-dim { opacity: 0.6; }
+.jv-legend .lg-hint { margin-left: auto; }
+
+/* ---- À propos / sources ---- */
+.modal.about { width: min(780px, 94vw); max-height: 86vh; overflow-y: auto; }
+.about h4 { margin: 20px 0 8px; font-size: 13px; font-family: var(--font-mono); letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-soft); }
+.about-intro { color: var(--ink-soft); font-size: 13.5px; line-height: 1.55; margin: 4px 0; }
+.about-table td { vertical-align: top; }
+.about-table a { color: var(--accent); text-decoration: none; }
+.about-table a:hover { text-decoration: underline; }
+.about-note { font-size: 11.5px; color: var(--ink-faint); margin-top: 3px; line-height: 1.4; }
+.about-none { color: var(--ink-faint); }
+.about-steps { color: var(--ink-soft); font-size: 13.5px; line-height: 1.7; padding-left: 20px; margin: 4px 0; }
+.about-ex { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; overflow-x: auto; white-space: pre; color: var(--ink); }
+.about-foot { font-size: 12px; color: var(--ink-faint); margin-top: 16px; }
+.about-foot a { color: var(--accent); }
+.st { font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
+.st-ok { color: var(--pass); background: color-mix(in srgb, var(--pass) 14%, transparent); border: 1px solid var(--pass); }
+.st-partial, .st-regrounding { color: var(--num); background: color-mix(in srgb, var(--num) 14%, transparent); border: 1px solid var(--num); }
+.st-todo { color: var(--ink-faint); background: var(--surface-2); border: 1px solid var(--hairline-2); }
