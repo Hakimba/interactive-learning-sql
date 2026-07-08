@@ -77,9 +77,30 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-family: var
 .reljoin-bg { fill: var(--surface); stroke: var(--accent); stroke-width: 1.2; }
 .reljoin:hover .reljoin-bg { fill: var(--accent-bg); }
 .reljoin-txt { fill: var(--accent); font-size: 12px; font-weight: 700; pointer-events: none; }
+/* lien AJOUTÉ à la main (≠ FK) : pointillé + couleur distincte + suppression */
+.rel-user { stroke: var(--num); stroke-dasharray: 6 4; }
+.reldel { pointer-events: auto; cursor: pointer; }
+.reldel-bg { fill: var(--surface); stroke: var(--fail); stroke-width: 1.2; }
+.reldel:hover .reldel-bg { fill: color-mix(in srgb, var(--fail) 15%, transparent); }
+.reldel-txt { fill: var(--fail); font-size: 10px; font-weight: 700; pointer-events: none; }
+/* badge HTML d'un lien : ⋈ générer · type (clic pour changer) · ✕ supprimer */
+.jbadge { position: absolute; transform: translate(-50%, -50%); display: flex; align-items: center; gap: 1px; background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 6px; box-shadow: var(--shadow); padding: 1px; font-family: var(--font-mono); z-index: 3; }
+.jbadge button { border: none; background: transparent; cursor: pointer; font-size: 10px; padding: 2px 5px; border-radius: 4px; color: var(--ink-soft); font-family: inherit; }
+.jb-sel { border: none; background: transparent; cursor: pointer; font-size: 10px; font-family: inherit; color: var(--accent); padding: 2px 3px; font-weight: 600; }
+.jbadge .jb-go { color: var(--accent); font-size: 12px; }
+.jbadge .jb-go:hover { background: var(--accent-bg); }
+.jbadge .jb-type { color: var(--ink); font-weight: 600; }
+.jbadge .jb-type:hover { background: var(--accent-bg); color: var(--accent); }
+.jbadge .jb-del { color: var(--fail); }
+.jbadge .jb-del:hover { background: color-mix(in srgb, var(--fail) 15%, transparent); }
 .map-hint { position: absolute; top: 10px; left: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); background: var(--surface); border: 1px solid var(--hairline); border-radius: 6px; padding: 3px 8px; pointer-events: none; }
-.node { position: absolute; background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 9px; box-shadow: var(--shadow); overflow: hidden; }
-.node-head { height: 30px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; background: var(--surface-2); border-bottom: 1px solid var(--hairline); cursor: grab; }
+.node { position: absolute; background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 9px; box-shadow: var(--shadow); }
+.node-head { height: 30px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; background: var(--surface-2); border-bottom: 1px solid var(--hairline); border-radius: 8px 8px 0 0; cursor: grab; }
+/* port de connexion (tirer pour créer une jointure) */
+.port { position: absolute; right: -6px; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); transform: translateY(-50%); cursor: crosshair; opacity: 0; transition: opacity .12s, transform .1s; }
+.node:hover .port { opacity: 0.55; }
+.port:hover { opacity: 1; transform: translateY(-50%) scale(1.35); }
+.rel-drag { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 4; }
 .node-head:active { cursor: grabbing; }
 .node-col { height: 24px; box-sizing: border-box; display: flex; align-items: center; gap: 7px; padding: 0 10px; font-size: 12.5px; border-top: 1px solid var(--hairline); }
 .node-col:first-of-type { border-top: none; }
@@ -121,6 +142,8 @@ table.grid td { font-family: var(--font-mono); }
 .constructs { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { font-family: var(--font-mono); font-size: 11px; border: 1px solid var(--hairline-2); background: var(--surface); color: var(--ink-soft); border-radius: 6px; padding: 4px 9px; cursor: pointer; }
 .chip:hover { border-color: var(--accent); color: var(--ink); }
+.chip-sel { appearance: auto; padding: 3px 4px; color: var(--ink-soft); }
+.chip-sel:hover { border-color: var(--accent); color: var(--ink); }
 .switch { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-soft); padding: 10px 14px 4px; cursor: pointer; }
 .result-area { flex: 1; overflow: auto; padding: 4px 14px 16px; }
 .results { display: flex; flex-direction: column; gap: 8px; }

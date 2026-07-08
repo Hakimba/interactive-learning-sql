@@ -11,8 +11,14 @@ import { Grid } from "./Grid";
 import { JoinPreview } from "./JoinView";
 import { JoinStep } from "./JoinStep";
 
-const SNIPPETS: Record<string, string> = {
-  SELECT: "SELECT ", FROM: " FROM ", JOIN: " JOIN  ON ", WHERE: " WHERE ", "ORDER BY": " ORDER BY ", LIMIT: " LIMIT 10",
+const JOIN_SNIPPETS: Record<string, string> = {
+  JOIN: " JOIN  ON ", "LEFT JOIN": " LEFT JOIN  ON ", "RIGHT JOIN": " RIGHT JOIN  ON ",
+  "FULL JOIN": " FULL JOIN  ON ", "CROSS JOIN": " CROSS JOIN ",
+};
+const OP_SNIPPETS: Record<string, string> = {
+  "=": " = ", "<>": " <> ", "<": " < ", "<=": " <= ", ">": " > ", ">=": " >= ",
+  AND: " AND ", OR: " OR ", NOT: " NOT ", IN: " IN ()", "NOT IN": " NOT IN ()",
+  LIKE: " LIKE '%'", BETWEEN: " BETWEEN  AND ", "IS NULL": " IS NULL", "IS NOT NULL": " IS NOT NULL",
 };
 const range = (n: number) => Array.from({ length: n }, (_, i) => i);
 const CLAUSE_LABEL: Record<ClauseKey, string> = {
@@ -67,7 +73,21 @@ function EditorTab() {
   return (
     <>
       <div class="constructs bar">
-        {Object.keys(SNIPPETS).map((k) => (<button class="chip" onClick={() => setSql(sql.value + SNIPPETS[k])}>{k}</button>))}
+        <button class="chip" onClick={() => setSql(sql.value + "SELECT ")}>SELECT</button>
+        <button class="chip" onClick={() => setSql(sql.value + " DISTINCT ")}>DISTINCT</button>
+        <button class="chip" onClick={() => setSql(sql.value + " FROM ")}>FROM</button>
+        <select class="chip chip-sel" onChange={(e) => { const el = e.target as HTMLSelectElement; if (el.value) setSql(sql.value + JOIN_SNIPPETS[el.value]); el.value = ""; }}>
+          <option value="">JOIN ▾</option>
+          {Object.keys(JOIN_SNIPPETS).map((k) => <option value={k}>{k}</option>)}
+        </select>
+        <button class="chip" onClick={() => setSql(sql.value + " WHERE ")}>WHERE</button>
+        <select class="chip chip-sel" onChange={(e) => { const el = e.target as HTMLSelectElement; if (el.value) setSql(sql.value + OP_SNIPPETS[el.value]); el.value = ""; }}>
+          <option value="">op ▾</option>
+          {Object.keys(OP_SNIPPETS).map((k) => <option value={k}>{k}</option>)}
+        </select>
+        <button class="chip" onClick={() => setSql(sql.value + " ORDER BY ")}>ORDER BY</button>
+        <button class="chip" onClick={() => setSql(sql.value + " LIMIT 10")}>LIMIT</button>
+        <button class="chip" onClick={() => setSql(sql.value + " OFFSET 0")}>OFFSET</button>
       </div>
       <textarea
         class="sql-input"

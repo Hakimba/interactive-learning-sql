@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from "preact/hooks";
 import { tables, activeTable, leftView, relations, setSql, resultOnly } from "../state";
 import { TYPES, SCHEMAS, cloneSchema, familyOf } from "../catalog";
 import { generateRows } from "../datagen";
-import type { Column, Table } from "../types";
+import type { Column, Table, Relation, JoinType } from "../types";
 import { Grid } from "./Grid";
 
 const W = 210, HEAD = 30, RH = 24; // dimensions fixes des cartes (pour placer les connecteurs sans mesurer le DOM)
@@ -74,7 +74,8 @@ function TableCreator({ onClose }: { onClose: () => void }) {
   );
 }
 
-type DragState = { mode: "pan" | "card" | "select"; name?: string; sx: number; sy: number; ox: number; oy: number };
+type DragState = { mode: "pan" | "card" | "select" | "link"; name?: string; col?: string; sx: number; sy: number; ox: number; oy: number };
+type LinkPos = { sx: number; sy: number; cx: number; cy: number };
 
 function SchemaCanvas() {
   const ts = tables.value;
@@ -82,10 +83,15 @@ function SchemaCanvas() {
   const [pan, setPan] = useState({ x: 24, y: 24 });
   const [zoom, setZoom] = useState(1);
   const drag = useRef<DragState | null>(null);
+  const mapRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef(pan), zoomRef = useRef(zoom);
+  panRef.current = pan; zoomRef.current = zoom;
   // sélection multiple de colonnes (glisser sur les lignes d'une carte)
   const [sel, setSel] = useState<{ table: string; cols: string[] } | null>(null);
   const selRef = useRef<{ table: string; cols: string[] } | null>(null);
   const setSelection = (v: { table: string; cols: string[] } | null) => { selRef.current = v; setSel(v); };
+  // trait élastique lors de la création d'une jointure au tirer-par-port
+  const [linkPos, setLinkPos] = useState<LinkPos | null>(null);
 
   // projette réellement les colonnes choisies (dans l'ordre de la table)
   const applySelect = (table: string, cols: string[]) => {
@@ -95,24 +101,49 @@ function SchemaCanvas() {
     resultOnly.value = true;
   };
 
+  // tirer un trait DESSINE juste le lien (sans type) ; le type se choisit ensuite dans le menu du lien.
+  const addLink = (fromT: string, fromC: string, toT: string, toC: string) => {
+    const dup = relations.value.some((r) =>
+      (r.fromTable === fromT && r.fromCol === fromC && r.toTable === toT && r.toCol === toC) ||
+      (r.fromTable === toT && r.fromCol === toC && r.toTable === fromT && r.toCol === fromC));
+    if (!dup) relations.value = [...relations.value, { fromTable: fromT, fromCol: fromC, toTable: toT, toCol: toC, user: true }];
+  };
+  const delRel = (r: (typeof relations.value)[number]) => { relations.value = relations.value.filter((x) => x !== r); };
+
+  const toStage = (e: MouseEvent) => {
+    const rect = mapRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return { x: (e.clientX - rect.left - panRef.current.x) / zoomRef.current, y: (e.clientY - rect.top - panRef.current.y) / zoomRef.current };
+  };
+
   useEffect(() => {
     const move = (e: MouseEvent) => {
       const d = drag.current;
       if (!d) return;
       if (d.mode === "pan") setPan({ x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) });
       else if (d.mode === "card") {
-        const nx = d.ox + (e.clientX - d.sx) / zoom, ny = d.oy + (e.clientY - d.sy) / zoom;
+        const nx = d.ox + (e.clientX - d.sx) / zoomRef.current, ny = d.oy + (e.clientY - d.sy) / zoomRef.current;
         tables.value = tables.value.map((t) => (t.name === d.name ? { ...t, x: nx, y: ny } : t));
+      } else if (d.mode === "link") {
+        const p = toStage(e);
+        setLinkPos((lp) => (lp ? { ...lp, cx: p.x, cy: p.y } : lp));
       }
     };
-    const up = () => {
-      if (drag.current?.mode === "select" && selRef.current) applySelect(selRef.current.table, selRef.current.cols);
+    const up = (e: MouseEvent) => {
+      const d = drag.current;
+      if (d?.mode === "select" && selRef.current) applySelect(selRef.current.table, selRef.current.cols);
+      if (d?.mode === "link" && d.name && d.col) {
+        const cell = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest("[data-col]") as HTMLElement | null;
+        const tgtT = cell?.getAttribute("data-table"), tgtC = cell?.getAttribute("data-col");
+        if (tgtT && tgtC && tgtT !== d.name) addLink(d.name, d.col, tgtT, tgtC);
+        setLinkPos(null);
+      }
       drag.current = null;
     };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
     return () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
-  }, [zoom]);
+  }, []);
 
   if (ts.length === 0) return <div class="hint">Charge un schéma ou crée une table — la vue devient une carte déplaçable.</div>;
 
@@ -122,6 +153,12 @@ function SchemaCanvas() {
   const colY = (t: Table, col: string) => {
     const i = t.columns.findIndex((c) => c.name.toLowerCase() === col.toLowerCase());
     return Y(t) + HEAD + ((i < 0 ? 0 : i) + 0.5) * RH;
+  };
+  const startLink = (e: MouseEvent, t: Table, c: Column) => {
+    e.stopPropagation();
+    const sx = X(t) + W, sy = colY(t, c.name);
+    drag.current = { mode: "link", name: t.name, col: c.name, sx: 0, sy: 0, ox: 0, oy: 0 };
+    setLinkPos({ sx, sy, cx: sx, cy: sy });
   };
 
   const paths = rels.map((r) => {
@@ -136,12 +173,24 @@ function SchemaCanvas() {
     return { r, d: `M ${ax} ${ay} C ${c1} ${ay}, ${c2} ${by}, ${bx} ${by}`, ax, ay, bx, by, mx: (ax + bx) / 2, my: (ay + by) / 2 };
   }).filter((p): p is NonNullable<typeof p> => p != null);
 
-  // clic sur une relation → génère la jointure. L'ordre suit la MAP : table la plus à gauche = FROM.
-  const genJoin = (r: { fromTable: string; fromCol: string; toTable: string; toCol: string }) => {
+  // clic sur une relation → génère la jointure (avec son type). Ordre spatial : table la plus à gauche = FROM.
+  const genJoin = (r: Relation) => {
+    const jt = r.jtype ?? "INNER";
     const fromLeft = X(byName(r.fromTable)) <= X(byName(r.toTable));
     const base = fromLeft ? r.fromTable : r.toTable, baseCol = fromLeft ? r.fromCol : r.toCol;
     const other = fromLeft ? r.toTable : r.fromTable, otherCol = fromLeft ? r.toCol : r.fromCol;
-    setSql(`SELECT * FROM ${base} JOIN ${other} ON ${base}.${baseCol} = ${other}.${otherCol}`);
+    if (jt === "CROSS") setSql(`SELECT * FROM ${base} CROSS JOIN ${other}`);
+    else {
+      const kw = jt === "INNER" ? "JOIN" : `${jt} JOIN`; // INNER = JOIN normal
+      setSql(`SELECT * FROM ${base} ${kw} ${other} ON ${base}.${baseCol} = ${other}.${otherCol}`);
+    }
+  };
+  const JOIN_TYPES: JoinType[] = ["INNER", "LEFT", "RIGHT", "FULL", "CROSS"];
+  // on choisit le type dans la liste déroulante du lien → ça écrit le JOIN.
+  const applyJoinType = (r: Relation, type: JoinType) => {
+    const updated = { ...r, jtype: type };
+    relations.value = relations.value.map((x) => (x === r ? updated : x));
+    genJoin(updated);
   };
 
   const startPan = (e: MouseEvent) => {
@@ -150,17 +199,15 @@ function SchemaCanvas() {
   };
 
   return (
-    <div class="schema-map" onMouseDown={startPan} onWheel={(e) => { e.preventDefault(); setZoom((z) => Math.min(2, Math.max(0.4, z * (e.deltaY < 0 ? 1.1 : 0.9)))); }}>
+    <div class="schema-map" ref={mapRef} onMouseDown={startPan} onWheel={(e) => { e.preventDefault(); setZoom((z) => Math.min(2, Math.max(0.4, z * (e.deltaY < 0 ? 1.1 : 0.9)))); }}>
       <div class="stage" style={`transform: translate(${pan.x}px, ${pan.y}px) scale(${zoom});`}>
         <svg class="rels" width="4000" height="3000">
+          {linkPos ? <path class="rel-drag" fill="none" d={`M ${linkPos.sx} ${linkPos.sy} C ${linkPos.sx + 40} ${linkPos.sy}, ${linkPos.cx - 40} ${linkPos.cy}, ${linkPos.cx} ${linkPos.cy}`} /> : null}
           {paths.map((p) => (
-            <g class="reljoin" onMouseDown={(e) => e.stopPropagation()} onClick={() => genJoin(p.r)}>
-              <title>créer la jointure {p.r.fromTable}.{p.r.fromCol} = {p.r.toTable}.{p.r.toCol}</title>
-              <path d={p.d} class="rel" fill="none" />
+            <g>
+              <path d={p.d} class={"rel" + (p.r.user ? " rel-user" : "")} fill="none" />
               <circle cx={p.ax} cy={p.ay} r="3.5" class="reldot" />
               <circle cx={p.bx} cy={p.by} r="3.5" class="reldot" />
-              <circle cx={p.mx} cy={p.my} r="10" class="reljoin-bg" />
-              <text x={p.mx} y={p.my} class="reljoin-txt" text-anchor="middle" dominant-baseline="central">⋈</text>
             </g>
           ))}
         </svg>
@@ -172,6 +219,8 @@ function SchemaCanvas() {
             </div>
             {t.columns.map((c) => (
               <div
+                data-table={t.name}
+                data-col={c.name}
                 class={"node-col clickable" + (sel && sel.table === t.name && sel.cols.includes(c.name) ? " sel" : "")}
                 title="clic = projeter · glisser = plusieurs contiguës · Ctrl/Cmd+clic = ajouter/retirer"
                 onMouseDown={(e) => {
@@ -194,10 +243,22 @@ function SchemaCanvas() {
                 <span class="nc-type">{c.type}</span>
               </div>
             ))}
+            {t.columns.map((c, i) => (
+              <span class="port" style={`top:${HEAD + i * RH + RH / 2}px`} title="tire vers une colonne pour créer une jointure" onMouseDown={(e) => startLink(e, t, c)} />
+            ))}
+          </div>
+        ))}
+        {paths.map((p) => (
+          <div class="jbadge" style={`left:${p.mx}px; top:${p.my}px;`} onMouseDown={(e) => e.stopPropagation()}>
+            <select class="jb-sel" value={p.r.jtype ?? ""} onChange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v) applyJoinType(p.r, v as JoinType); }}>
+              <option value="">⋈ type…</option>
+              {JOIN_TYPES.map((t) => <option value={t}>{t === "INNER" ? "JOIN (normal)" : t}</option>)}
+            </select>
+            {p.r.user ? <button class="jb-del" title="supprimer ce lien ajouté" onClick={() => delRel(p.r)}>✕</button> : null}
           </div>
         ))}
       </div>
-      {paths.length > 0 ? <div class="map-hint">Clique une relation (⋈) pour générer le JOIN</div> : null}
+      <div class="map-hint">tire un port ● entre deux colonnes, puis choisis le type dans le menu ⋈ du lien → JOIN · plein = FK, pointillé = ajouté (✕)</div>
       <div class="zoom-controls">
         <button class="btn ghost" onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button>
         <span class="zlabel">{Math.round(zoom * 100)}%</span>
