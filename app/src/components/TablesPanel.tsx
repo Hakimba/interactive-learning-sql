@@ -1,11 +1,13 @@
 // Panneau gauche : sandbox des tables. Vue Schéma = MAP (façon DBeaver / diagramme UML) :
 // cartes déplaçables, pan/zoom, relations FK dessinées automatiquement. Vue Données = grille.
 import { useState, useRef, useEffect } from "preact/hooks";
-import { tables, activeTable, leftView, relations, setSql, resultOnly } from "../state";
-import { TYPES, SCHEMAS, cloneSchema, familyOf } from "../catalog";
+import {
+  tables, activeTable, leftView, relations, setSql, resultOnly,
+  userSchemas, activeSchemaKey, createSchema, deleteSchema,
+} from "../state";
+import { TYPES, SCHEMAS, familyOf, type Schema } from "../catalog";
 import { generateRows } from "../datagen";
-import type { Column, Table, Relation, JoinType } from "../types";
-import { Grid } from "./Grid";
+import type { Column, Table, Relation, JoinType, Val } from "../types";
 
 const W = 210, HEAD = 30, RH = 24; // dimensions fixes des cartes (pour placer les connecteurs sans mesurer le DOM)
 
@@ -17,13 +19,45 @@ function replaceTable(name: string, updater: (t: Table) => Table) {
   tables.value = tables.value.map((t) => (t.name === name ? updater(t) : t));
 }
 
-function loadPreset(key: string) {
-  const s = cloneSchema(key);
-  if (!s) return;
+// Charge un schéma (preset OU créé par l'utilisateur). Les presets ne sont pas suivis
+// (activeSchemaKey = null → pas de sync) ; un schéma utilisateur devient actif et se resynchronise.
+function loadSchema(key: string) {
+  const src = SCHEMAS[key] ?? userSchemas.value[key];
+  if (!src) return;
+  const s = JSON.parse(JSON.stringify(src)) as Schema;
   s.tables.forEach((t) => (t.rows = generateRows(t, 8)));
+  activeSchemaKey.value = SCHEMAS[key] ? null : key;
   tables.value = s.tables;
-  relations.value = s.relations; // ← les FK des presets, dessinées sur la map
+  relations.value = s.relations; // ← FK dessinées sur la map
   activeTable.value = s.tables[0]?.name ?? null;
+}
+
+function SchemaCreator({ onClose }: { onClose: () => void }) {
+  const [name, setName] = useState("");
+  const [err, setErr] = useState("");
+  function save() {
+    const nm = name.trim();
+    if (!nm) return setErr("Nomme le schéma.");
+    const taken = [
+      ...Object.values(SCHEMAS).map((s) => s.label),
+      ...Object.values(userSchemas.value).map((s) => s.label),
+    ];
+    if (taken.some((l) => l.toLowerCase() === nm.toLowerCase())) return setErr("Ce nom existe déjà.");
+    createSchema(nm);
+    leftView.value = "schema"; // on montre la carte vide, prête à recevoir des tables
+    onClose();
+  }
+  return (
+    <div class="modal-backdrop" onClick={onClose}>
+      <div class="modal" onClick={(e) => e.stopPropagation()}>
+        <div class="modal-head"><strong>Nouveau schéma</strong><button class="btn ghost" onClick={onClose}>✕</button></div>
+        <p class="modal-note">Un schéma vierge : la carte se vide, puis tu ajoutes des tables (+ Table) et tires les liens de jointure. Il est enregistré dans le navigateur et rechargeable via « Charger un schéma… ».</p>
+        <label class="field"><span>Nom</span><input autofocus value={name} placeholder="ex. ventes_2026" onInput={(e) => setName((e.target as HTMLInputElement).value)} onKeyDown={(e) => { if (e.key === "Enter") save(); }} /></label>
+        {err ? <div class="modal-error">{err}</div> : null}
+        <div class="modal-foot"><button class="btn ghost" onClick={onClose}>Annuler</button><button class="btn primary" onClick={save}>Créer</button></div>
+      </div>
+    </div>
+  );
 }
 
 function TableCreator({ onClose }: { onClose: () => void }) {
@@ -77,7 +111,7 @@ function TableCreator({ onClose }: { onClose: () => void }) {
 type DragState = { mode: "pan" | "card" | "select" | "link"; name?: string; col?: string; sx: number; sy: number; ox: number; oy: number };
 type LinkPos = { sx: number; sy: number; cx: number; cy: number };
 
-function SchemaCanvas() {
+function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
   const ts = tables.value;
   const rels = relations.value;
   const [pan, setPan] = useState({ x: 24, y: 24 });
@@ -145,7 +179,21 @@ function SchemaCanvas() {
     return () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
   }, []);
 
-  if (ts.length === 0) return <div class="hint">Charge un schéma ou crée une table — la vue devient une carte déplaçable.</div>;
+  // Barre d'outils de la ZONE schéma : "+ Table" opère à l'intérieur du schéma courant.
+  const toolbar = (
+    <div class="map-toolbar">
+      <button class="btn primary" onClick={onNewTable}>+ Table</button>
+      <span class="muted">ajoute une table à ce schéma</span>
+    </div>
+  );
+
+  if (ts.length === 0)
+    return (
+      <div class="schema-view">
+        {toolbar}
+        <div class="hint">Schéma vide — clique « + Table » pour le construire, ou charge un schéma existant.</div>
+      </div>
+    );
 
   const X = (t?: Table) => t?.x ?? 40;
   const Y = (t?: Table) => t?.y ?? 40;
@@ -199,7 +247,9 @@ function SchemaCanvas() {
   };
 
   return (
-    <div class="schema-map" ref={mapRef} onMouseDown={startPan} onWheel={(e) => { e.preventDefault(); setZoom((z) => Math.min(2, Math.max(0.4, z * (e.deltaY < 0 ? 1.1 : 0.9)))); }}>
+    <div class="schema-view">
+      {toolbar}
+      <div class="schema-map" ref={mapRef} onMouseDown={startPan} onWheel={(e) => { e.preventDefault(); setZoom((z) => Math.min(2, Math.max(0.4, z * (e.deltaY < 0 ? 1.1 : 0.9)))); }}>
       <div class="stage" style={`transform: translate(${pan.x}px, ${pan.y}px) scale(${zoom});`}>
         <svg class="rels" width="4000" height="3000">
           {linkPos ? <path class="rel-drag" fill="none" d={`M ${linkPos.sx} ${linkPos.sy} C ${linkPos.sx + 40} ${linkPos.sy}, ${linkPos.cx - 40} ${linkPos.cy}, ${linkPos.cx} ${linkPos.cy}`} /> : null}
@@ -265,53 +315,145 @@ function SchemaCanvas() {
         <button class="btn ghost" onClick={() => setZoom((z) => Math.min(2, +(z + 0.1).toFixed(2)))}>+</button>
         <button class="btn ghost" onClick={() => { setZoom(1); setPan({ x: 24, y: 24 }); }}>recentrer</button>
       </div>
+      </div>
     </div>
   );
 }
 
-function DataView() {
+function DataView({ onNewTable }: { onNewTable: () => void }) {
   const ts = tables.value;
   const [count, setCount] = useState(8);
-  if (ts.length === 0) return <div class="hint">Charge un schéma ou crée une table pour voir des données.</div>;
+  if (ts.length === 0)
+    return (
+      <div class="data-view">
+        <div class="table-tabs"><button class="tab tab-add" onClick={onNewTable}>+ Table</button></div>
+        <div class="hint">Aucune table. Clique « + Table » pour en ajouter une, ou charge un schéma existant.</div>
+      </div>
+    );
   const active = ts.find((t) => t.name === activeTable.value) ?? ts[0];
+
+  // Édition en direct : chaque frappe met à jour la ligne (chaîne brute ; le typage se fait au moteur).
+  const setCell = (ri: number, col: string, v: Val) =>
+    replaceTable(active.name, (t) => ({ ...t, rows: t.rows.map((r, i) => (i === ri ? { ...r, [col]: v } : r)) }));
+  const deleteRow = (ri: number) =>
+    replaceTable(active.name, (t) => ({ ...t, rows: t.rows.filter((_, i) => i !== ri) }));
+  const clearRows = () => replaceTable(active.name, (t) => ({ ...t, rows: [] }));
+  const addRow = () =>
+    replaceTable(active.name, (t) => {
+      const row: Record<string, Val> = {};
+      for (const c of t.columns) {
+        if (c.pk && familyOf(c.type) === "num") { // PK entière : auto-incrément pratique
+          const max = t.rows.reduce((m, r) => { const n = Number(r[c.name]); return Number.isFinite(n) ? Math.max(m, n) : m; }, 0);
+          row[c.name] = max + 1;
+        } else row[c.name] = null;
+      }
+      return { ...t, rows: [...t.rows, row] };
+    });
+
   return (
     <div class="data-view">
       <div class="table-tabs">
         {ts.map((t) => <button class={"tab" + (t.name === active.name ? " active" : "")} onClick={() => (activeTable.value = t.name)}>{t.name}</button>)}
+        <button class="tab tab-add" title="Ajouter une table" onClick={onNewTable}>+ Table</button>
       </div>
       <div class="data-toolbar">
         <button class="link-name" title={"SELECT * FROM " + active.name} onClick={() => selAll(active.name)}>⤵ {active.name}</button>
-        <span class="muted">{active.rows.length} lignes</span>
+        <span class="muted">{active.rows.length} ligne(s)</span>
         <div class="spacer" />
+        <button class="btn" title="Ajouter une ligne vide à saisir à la main" onClick={addRow}>+ Ligne</button>
+        <span class="tool-sep" />
         <input class="num-input" type="number" min={1} max={500} value={count} onInput={(e) => setCount(parseInt((e.target as HTMLInputElement).value) || 1)} />
-        <button class="btn primary" onClick={() => replaceTable(active.name, (t) => ({ ...t, rows: generateRows(t, count) }))}>Générer des données</button>
-        <button class="btn ghost" onClick={() => { tables.value = ts.filter((t) => t.name !== active.name); activeTable.value = tables.value[0]?.name ?? null; }}>Supprimer</button>
+        <button class="btn primary" title="Remplace le contenu par des données aléatoires plausibles" onClick={() => replaceTable(active.name, (t) => ({ ...t, rows: generateRows(t, count) }))}>Générer</button>
+        {active.rows.length ? <button class="btn ghost" title="Vider les lignes pour repartir d'une saisie manuelle" onClick={clearRows}>Vider</button> : null}
+        <span class="tool-sep" />
+        <button class="btn ghost danger" title="Supprimer la table entière" onClick={() => { tables.value = ts.filter((t) => t.name !== active.name); activeTable.value = tables.value[0]?.name ?? null; }}>🗑 Table</button>
       </div>
-      <Grid columns={active.columns.map((c) => c.name)} rows={active.rows.map((r) => active.columns.map((c) => r[c.name] ?? null))} onColClick={(col) => selCol(col, active.name)} />
+      <div class="grid-wrap">
+        <table class="grid editable">
+          <thead>
+            <tr>
+              <th class="gutter">#</th>
+              {active.columns.map((c) => (
+                <th class="th clickable" title={"insérer « " + c.name + " » dans la requête"} onClick={() => selCol(c.name, active.name)}>
+                  {c.name}{c.pk ? <span class="pk">PK</span> : null}<span class="th-type">{c.type}</span>
+                </th>
+              ))}
+              <th class="gutter"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {active.rows.map((r, ri) => (
+              <tr>
+                <td class="gutter rownum">{ri + 1}</td>
+                {active.columns.map((c) => (
+                  <td>
+                    {familyOf(c.type) === "bool" ? (
+                      <select
+                        class="cell-input fam-bool"
+                        value={r[c.name] === true ? "true" : r[c.name] === false ? "false" : ""}
+                        onChange={(e) => { const v = (e.target as HTMLSelectElement).value; setCell(ri, c.name, v === "" ? null : v === "true"); }}
+                      >
+                        <option value="">NULL</option>
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                      </select>
+                    ) : (
+                      <input
+                        class={"cell-input fam-" + familyOf(c.type)}
+                        value={r[c.name] === null || r[c.name] === undefined ? "" : String(r[c.name])}
+                        placeholder="NULL"
+                        title="valeur — modifiable en direct"
+                        onInput={(e) => { const s = (e.target as HTMLInputElement).value; setCell(ri, c.name, s === "" ? null : s); }}
+                      />
+                    )}
+                  </td>
+                ))}
+                <td class="gutter"><button class="row-del" title="supprimer la ligne" onClick={() => deleteRow(ri)}>✕</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {active.rows.length === 0 ? <div class="grid-empty">— aucune ligne — clique « + Ligne » pour saisir, ou « Générer »</div> : null}
+      </div>
     </div>
   );
 }
 
 export function TablesPanel() {
-  const [creating, setCreating] = useState(false);
+  const [creatingTable, setCreatingTable] = useState(false);
+  const [creatingSchema, setCreatingSchema] = useState(false);
+  const users = Object.entries(userSchemas.value);
+  const activeKey = activeSchemaKey.value;
+  const activeUser = activeKey ? userSchemas.value[activeKey] : null;
   return (
     <section class="panel panel-left">
       <div class="panel-head">
         <strong class="panel-title">Tables</strong>
         <div class="left-tools">
-          <button class="btn primary" onClick={() => setCreating(true)}>+ Table</button>
-          <select class="btn select" onChange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v) loadPreset(v); (e.target as HTMLSelectElement).value = ""; }}>
+          <button class="btn primary" onClick={() => setCreatingSchema(true)}>+ Schéma</button>
+          <select class="btn select" value={activeKey ?? ""} onChange={(e) => { const v = (e.target as HTMLSelectElement).value; if (v) loadSchema(v); else (e.target as HTMLSelectElement).value = activeKey ?? ""; }}>
             <option value="">Charger un schéma…</option>
-            {Object.entries(SCHEMAS).map(([k, s]) => <option value={k}>{s.label}</option>)}
+            <optgroup label="Exemples">
+              {Object.entries(SCHEMAS).map(([k, s]) => <option value={k}>{s.label}</option>)}
+            </optgroup>
+            {users.length ? (
+              <optgroup label="Mes schémas">
+                {users.map(([k, s]) => <option value={k}>{s.label}</option>)}
+              </optgroup>
+            ) : null}
           </select>
+          {activeUser ? (
+            <button class="btn ghost" title={`Supprimer le schéma « ${activeUser.label} »`} onClick={() => { if (confirm(`Supprimer le schéma « ${activeUser.label} » ? Cette action est définitive.`)) deleteSchema(activeKey!); }}>🗑 Supprimer</button>
+          ) : null}
           <div class="segmented">
             <button class={"seg" + (leftView.value === "schema" ? " active" : "")} onClick={() => (leftView.value = "schema")}>Schéma</button>
             <button class={"seg" + (leftView.value === "data" ? " active" : "")} onClick={() => (leftView.value = "data")}>Données</button>
           </div>
         </div>
       </div>
-      <div class="panel-body">{leftView.value === "schema" ? <SchemaCanvas /> : <DataView />}</div>
-      {creating ? <TableCreator onClose={() => setCreating(false)} /> : null}
+      <div class="panel-body">{leftView.value === "schema" ? <SchemaCanvas onNewTable={() => setCreatingTable(true)} /> : <DataView onNewTable={() => setCreatingTable(true)} />}</div>
+      {creatingTable ? <TableCreator onClose={() => setCreatingTable(false)} /> : null}
+      {creatingSchema ? <SchemaCreator onClose={() => setCreatingSchema(false)} /> : null}
     </section>
   );
 }

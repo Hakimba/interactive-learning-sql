@@ -66,7 +66,9 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-family: var
 .dot-num { background: var(--num); } .dot-text { background: var(--accent); } .dot-bool { background: #8a7fe0; } .dot-time { background: #5aa9e0; } .dot-id { background: #c56cc0; }
 
 /* vue Schéma = map (DBeaver / UML) */
-.schema-map { position: relative; height: 100%; min-height: 440px; overflow: hidden; border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface); background-image: radial-gradient(var(--hairline) 1px, transparent 1px); background-size: 22px 22px; cursor: grab; user-select: none; }
+.schema-view { display: flex; flex-direction: column; gap: 10px; height: 100%; }
+.map-toolbar { display: flex; align-items: center; gap: 10px; }
+.schema-map { position: relative; flex: 1; min-height: 440px; overflow: hidden; border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface); background-image: radial-gradient(var(--hairline) 1px, transparent 1px); background-size: 22px 22px; cursor: grab; user-select: none; }
 .schema-map:active { cursor: grabbing; }
 .stage { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .rels { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
@@ -117,7 +119,11 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-family: var
 .table-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tab { background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 999px; padding: 4px 12px; cursor: pointer; color: var(--ink-soft); font-size: 13px; }
 .tab.active { border-color: var(--accent); color: var(--ink); background: var(--accent-bg); }
-.data-toolbar { display: flex; align-items: center; gap: 8px; }
+.tab-add { border-style: dashed; color: var(--accent); font-weight: 600; }
+.tab-add:hover { border-color: var(--accent); background: var(--accent-bg); }
+.data-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool-sep { width: 1px; align-self: stretch; min-height: 22px; background: var(--hairline); }
+.btn.danger:hover { border-color: var(--fail); color: var(--fail); }
 .data-toolbar .spacer { flex: 1; }
 .muted { color: var(--ink-faint); font-size: 12px; font-family: var(--font-mono); }
 .num-input { width: 64px; padding: 5px 8px; border: 1px solid var(--hairline-2); border-radius: 7px; background: var(--surface); color: var(--ink); }
@@ -133,6 +139,20 @@ table.grid td { font-family: var(--font-mono); }
 .grid td .bool { color: #8a7fe0; }
 .gutter { width: 1%; }
 .grid-empty { padding: 14px; color: var(--ink-faint); font-size: 13px; text-align: center; }
+
+/* Cellules éditables (vue Données) : inputs discrets qui s'activent au survol/focus. */
+.grid.editable td { padding: 3px 5px; }
+.grid.editable td.gutter { padding: 3px 8px; }
+.grid.editable .th-type { margin-left: 6px; color: var(--ink-faint); font-weight: 400; font-size: 10px; }
+.rownum { color: var(--ink-faint); font-size: 11px; text-align: right; }
+.cell-input { width: 100%; min-width: 82px; box-sizing: border-box; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ink); font-family: var(--font-mono); font-size: 13px; padding: 4px 6px; }
+.cell-input:hover { border-color: var(--hairline-2); }
+.cell-input:focus { outline: none; border-color: var(--accent); background: var(--ground); }
+.cell-input::placeholder { color: var(--ink-faint); font-style: italic; }
+.cell-input.fam-num { color: var(--num); }
+.cell-input.fam-bool { color: #8a7fe0; cursor: pointer; }
+.row-del { border: none; background: none; color: var(--ink-faint); cursor: pointer; font-size: 12px; padding: 2px 6px; border-radius: 6px; }
+.row-del:hover { color: var(--fail); background: var(--accent-bg); }
 .row-pass { background: color-mix(in srgb, var(--pass) 12%, transparent); }
 .row-fail { opacity: 0.5; }
 
@@ -169,6 +189,7 @@ table.grid td { font-family: var(--font-mono); }
 .modal-backdrop { position: fixed; inset: 0; background: #0008; display: flex; align-items: center; justify-content: center; z-index: 50; }
 .modal { background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 14px; width: min(560px, 92vw); padding: 18px; box-shadow: 0 20px 60px -20px #000; }
 .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.modal-note { font-size: 13px; line-height: 1.5; color: var(--ink-soft); margin: 0 0 14px; }
 .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
 .field span { font-size: 12px; color: var(--ink-soft); }
 .field input { padding: 7px 10px; border: 1px solid var(--hairline-2); border-radius: 8px; background: var(--ground); color: var(--ink); }
