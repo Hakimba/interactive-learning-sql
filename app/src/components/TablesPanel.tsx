@@ -51,7 +51,7 @@ function SchemaCreator({ onClose }: { onClose: () => void }) {
     <div class="modal-backdrop" onClick={onClose}>
       <div class="modal" onClick={(e) => e.stopPropagation()}>
         <div class="modal-head"><strong>Nouveau schéma</strong><button class="btn ghost" onClick={onClose}>✕</button></div>
-        <p class="modal-note">Un schéma vierge : la carte se vide, puis tu ajoutes des tables (+ Table) et tires les liens de jointure. Il est enregistré dans le navigateur et rechargeable via « Charger un schéma… ».</p>
+        <p class="modal-note">Un schéma vierge : la carte se vide, puis tu ajoutes des tables (+ Table) et définis les clés étrangères (champ FK à la création, ou en tirant un lien sur la map). Il est enregistré dans le navigateur et rechargeable via « Charger un schéma… ».</p>
         <label class="field"><span>Nom</span><input autofocus value={name} placeholder="ex. ventes_2026" onInput={(e) => setName((e.target as HTMLInputElement).value)} onKeyDown={(e) => { if (e.key === "Enter") save(); }} /></label>
         {err ? <div class="modal-error">{err}</div> : null}
         <div class="modal-foot"><button class="btn ghost" onClick={onClose}>Annuler</button><button class="btn primary" onClick={save}>Créer</button></div>
@@ -60,14 +60,19 @@ function SchemaCreator({ onClose }: { onClose: () => void }) {
   );
 }
 
+// Colonne en cours d'édition : une colonne standard + une cible de clé étrangère facultative ("table.colonne").
+type DraftCol = Column & { fk?: string };
+
 function TableCreator({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("ma_table");
-  const [cols, setCols] = useState<Column[]>([
+  const [cols, setCols] = useState<DraftCol[]>([
     { name: "id", type: "INTEGER", pk: true },
     { name: "libelle", type: "VARCHAR" },
   ]);
   const [err, setErr] = useState("");
-  const setCol = (i: number, patch: Partial<Column>) => setCols(cols.map((c, k) => (k === i ? { ...c, ...patch } : c)));
+  const setCol = (i: number, patch: Partial<DraftCol>) => setCols(cols.map((c, k) => (k === i ? { ...c, ...patch } : c)));
+  // cibles FK possibles : toutes les colonnes des tables déjà existantes
+  const fkTargets = tables.value.flatMap((t) => t.columns.map((c) => `${t.name}.${c.name}`));
 
   function save() {
     const nm = name.trim();
@@ -76,9 +81,19 @@ function TableCreator({ onClose }: { onClose: () => void }) {
     const clean = cols.filter((c) => c.name.trim());
     if (clean.length === 0) return setErr("Ajoute au moins une colonne.");
     const k = tables.value.length;
-    const t: Table = { name: nm, columns: clean, rows: [], x: 40 + (k % 3) * 240, y: 40 + Math.floor(k / 3) * 200 };
+    const columns: Column[] = clean.map(({ fk, ...c }) => c); // on retire le champ FK transitoire
+    const t: Table = { name: nm, columns, rows: [], x: 40 + (k % 3) * 240, y: 40 + Math.floor(k / 3) * 200 };
     t.rows = generateRows(t, 8);
     tables.value = [...tables.value, t];
+    // Les FK choisies → relations (source unique dessinée sur la map + génératrice de JOIN).
+    const newRels: Relation[] = [];
+    for (const c of clean) {
+      if (!c.fk) continue;
+      const dot = c.fk.indexOf(".");
+      if (dot < 0) continue;
+      newRels.push({ fromTable: nm, fromCol: c.name, toTable: c.fk.slice(0, dot), toCol: c.fk.slice(dot + 1), user: true });
+    }
+    if (newRels.length) relations.value = [...relations.value, ...newRels];
     activeTable.value = nm;
     onClose();
   }
@@ -88,6 +103,7 @@ function TableCreator({ onClose }: { onClose: () => void }) {
       <div class="modal" onClick={(e) => e.stopPropagation()}>
         <div class="modal-head"><strong>Nouvelle table</strong><button class="btn ghost" onClick={onClose}>✕</button></div>
         <label class="field"><span>Nom</span><input value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} /></label>
+        <p class="modal-note"><b>PK</b> = clé primaire · <b>FK</b> = clé étrangère : la colonne référence une colonne d'une autre table (le lien apparaît alors sur la map).</p>
         <div class="cols-editor">
           {cols.map((c, i) => (
             <div class="col-row">
@@ -96,6 +112,12 @@ function TableCreator({ onClose }: { onClose: () => void }) {
                 {TYPES.map((t) => <option value={t.name}>{t.name}</option>)}
               </select>
               <label class="c-pk"><input type="checkbox" checked={!!c.pk} onChange={(e) => setCol(i, { pk: (e.target as HTMLInputElement).checked })} /> PK</label>
+              {fkTargets.length ? (
+                <select class="c-fk" value={c.fk ?? ""} title="Clé étrangère : cette colonne référence…" onChange={(e) => setCol(i, { fk: (e.target as HTMLSelectElement).value || undefined })}>
+                  <option value="">FK → —</option>
+                  {fkTargets.map((tgt) => <option value={tgt}>{tgt}</option>)}
+                </select>
+              ) : null}
               <button class="btn ghost small" onClick={() => setCols(cols.filter((_, k) => k !== i))}>✕</button>
             </div>
           ))}
@@ -240,6 +262,14 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
     relations.value = relations.value.map((x) => (x === r ? updated : x));
     genJoin(updated);
   };
+  // une colonne est une FK si elle est le côté « from » d'une relation → badge FK (dérivé, pas stocké).
+  const fkOf = (tname: string, col: string) =>
+    rels.find((r) => r.fromTable.toLowerCase() === tname.toLowerCase() && r.fromCol.toLowerCase() === col.toLowerCase());
+  // inverse le sens d'une relation (corrige quel côté porte la FK).
+  const swapRel = (r: Relation) => {
+    relations.value = relations.value.map((x) =>
+      x === r ? { ...x, fromTable: x.toTable, fromCol: x.toCol, toTable: x.fromTable, toCol: x.fromCol } : x);
+  };
 
   const startPan = (e: MouseEvent) => {
     if ((e.target as HTMLElement).closest(".node")) return;
@@ -267,7 +297,9 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
               <button class="link-name" title={"SELECT * FROM " + t.name} onMouseDown={(e) => e.stopPropagation()} onClick={() => selAll(t.name)}>{t.name}</button>
               <span class="tc-count">{t.rows.length}</span>
             </div>
-            {t.columns.map((c) => (
+            {t.columns.map((c) => {
+              const fk = fkOf(t.name, c.name);
+              return (
               <div
                 data-table={t.name}
                 data-col={c.name}
@@ -289,10 +321,10 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
                 onMouseEnter={() => { if (drag.current?.mode === "select" && selRef.current?.table === t.name && !selRef.current.cols.includes(c.name)) setSelection({ table: t.name, cols: [...selRef.current.cols, c.name] }); }}
               >
                 <span class={"dot dot-" + familyOf(c.type)}></span>
-                <span class="nc-name">{c.name}{c.pk ? <span class="pk">PK</span> : null}</span>
+                <span class="nc-name">{c.name}{c.pk ? <span class="pk">PK</span> : null}{fk ? <span class="fk" title={`FK → ${fk.toTable}.${fk.toCol}`}>FK</span> : null}</span>
                 <span class="nc-type">{c.type}</span>
               </div>
-            ))}
+            );})}
             {t.columns.map((c, i) => (
               <span class="port" style={`top:${HEAD + i * RH + RH / 2}px`} title="tire vers une colonne pour créer une jointure" onMouseDown={(e) => startLink(e, t, c)} />
             ))}
@@ -304,11 +336,12 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
               <option value="">⋈ type…</option>
               {JOIN_TYPES.map((t) => <option value={t}>{t === "INNER" ? "JOIN (normal)" : t}</option>)}
             </select>
+            <button class="jb-swap" title={`inverser le sens de la FK (actuel : ${p.r.fromTable}.${p.r.fromCol} → ${p.r.toTable}.${p.r.toCol})`} onClick={() => swapRel(p.r)}>⇄</button>
             {p.r.user ? <button class="jb-del" title="supprimer ce lien ajouté" onClick={() => delRel(p.r)}>✕</button> : null}
           </div>
         ))}
       </div>
-      <div class="map-hint">tire un port ● entre deux colonnes, puis choisis le type dans le menu ⋈ du lien → JOIN · plein = FK, pointillé = ajouté (✕)</div>
+      <div class="map-hint">définir une FK : tire un port ● d'une colonne vers une autre (ou champ FK à la création de table) · badge FK sur la colonne · menu du lien : ⋈ type de JOIN · ⇄ sens · ✕ supprimer</div>
       <div class="zoom-controls">
         <button class="btn ghost" onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button>
         <span class="zlabel">{Math.round(zoom * 100)}%</span>
