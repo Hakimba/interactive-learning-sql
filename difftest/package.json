@@ -1,0 +1,9 @@
+{
+  "name": "sql-sandbox-difftest",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Test différentiel : notre moteur vs SQLite (oracle) via sql.js",
+  "dependencies": {
+    "sql.js": "^1.12.0"
+  }
+}

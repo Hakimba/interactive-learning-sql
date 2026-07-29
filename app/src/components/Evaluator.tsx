@@ -5,11 +5,20 @@
 //  • Pas à pas: VERROUILLÉ. Même mécanique, cumulée clause par clause (WHERE→ORDER→LIMIT→…).
 import { sql, setSql, resultOnly, rightTab, stepSql, stepIndex, enterStep, database, bindEditor, noteCursor } from "../state";
 import { analyze } from "../analyze";
+import { computeJoin } from "../join";
 import type { ClauseKey } from "../clauses";
 import { Grid } from "./Grid";
+import { JoinPreview } from "./JoinView";
+import { JoinStep } from "./JoinStep";
 
-const SNIPPETS: Record<string, string> = {
-  SELECT: "SELECT ", FROM: " FROM ", WHERE: " WHERE ", "ORDER BY": " ORDER BY ", LIMIT: " LIMIT 10",
+const JOIN_SNIPPETS: Record<string, string> = {
+  JOIN: " JOIN  ON ", "LEFT JOIN": " LEFT JOIN  ON ", "RIGHT JOIN": " RIGHT JOIN  ON ",
+  "FULL JOIN": " FULL JOIN  ON ", "CROSS JOIN": " CROSS JOIN ",
+};
+const OP_SNIPPETS: Record<string, string> = {
+  "=": " = ", "<>": " <> ", "<": " < ", "<=": " <= ", ">": " > ", ">=": " >= ",
+  AND: " AND ", OR: " OR ", NOT: " NOT ", IN: " IN ()", "NOT IN": " NOT IN ()",
+  LIKE: " LIKE '%'", BETWEEN: " BETWEEN  AND ", "IS NULL": " IS NULL", "IS NOT NULL": " IS NOT NULL",
 };
 const range = (n: number) => Array.from({ length: n }, (_, i) => i);
 const CLAUSE_LABEL: Record<ClauseKey, string> = {
@@ -54,11 +63,31 @@ function PreviewView() {
   );
 }
 
+function EditorResults() {
+  const jd = computeJoin(sql.value, database.value);
+  if (jd) return <JoinPreview data={jd} />;
+  return <PreviewView />;
+}
+
 function EditorTab() {
   return (
     <>
       <div class="constructs bar">
-        {Object.keys(SNIPPETS).map((k) => (<button class="chip" onClick={() => setSql(sql.value + SNIPPETS[k])}>{k}</button>))}
+        <button class="chip" onClick={() => setSql(sql.value + "SELECT ")}>SELECT</button>
+        <button class="chip" onClick={() => setSql(sql.value + " DISTINCT ")}>DISTINCT</button>
+        <button class="chip" onClick={() => setSql(sql.value + " FROM ")}>FROM</button>
+        <select class="chip chip-sel" onChange={(e) => { const el = e.target as HTMLSelectElement; if (el.value) setSql(sql.value + JOIN_SNIPPETS[el.value]); el.value = ""; }}>
+          <option value="">JOIN ▾</option>
+          {Object.keys(JOIN_SNIPPETS).map((k) => <option value={k}>{k}</option>)}
+        </select>
+        <button class="chip" onClick={() => setSql(sql.value + " WHERE ")}>WHERE</button>
+        <select class="chip chip-sel" onChange={(e) => { const el = e.target as HTMLSelectElement; if (el.value) setSql(sql.value + OP_SNIPPETS[el.value]); el.value = ""; }}>
+          <option value="">op ▾</option>
+          {Object.keys(OP_SNIPPETS).map((k) => <option value={k}>{k}</option>)}
+        </select>
+        <button class="chip" onClick={() => setSql(sql.value + " ORDER BY ")}>ORDER BY</button>
+        <button class="chip" onClick={() => setSql(sql.value + " LIMIT 10")}>LIMIT</button>
+        <button class="chip" onClick={() => setSql(sql.value + " OFFSET 0")}>OFFSET</button>
       </div>
       <textarea
         class="sql-input"
@@ -76,7 +105,7 @@ function EditorTab() {
         </button>
         <button class="btn" onClick={enterStep} title="Évaluer pas à pas (verrouillé)">Pas à pas →</button>
       </div>
-      <div class="result-area"><PreviewView /></div>
+      <div class="result-area"><EditorResults /></div>
     </>
   );
 }
@@ -84,6 +113,8 @@ function EditorTab() {
 /* ---------------- Onglet Pas à pas (verrouillé) ---------------- */
 function StepTab() {
   const text = stepSql.value;
+  const jd = computeJoin(text, database.value);
+  if (jd) return <JoinStep data={jd} />; // pas-à-pas dédié aux jointures (nested-loop)
   const a = analyze(text, database.value);
   if (!a.ok) return <div class="placeholder">{a.note}</div>;
   const steps = a.seg.evalOrder;
@@ -130,7 +161,7 @@ function StepTab() {
 
   return (
     <>
-      <div class="lock-bar">🔒 requête figée · lecture seule
+      <div class="lock-bar">
         <button class="btn ghost small" onClick={() => (rightTab.value = "editor")}>← revenir à l'éditeur</button>
       </div>
       <div class="proof-query">

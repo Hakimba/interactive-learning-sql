@@ -21,7 +21,8 @@ type tok =
 let keywords =
   [ "select"; "distinct"; "from"; "where"; "as"; "and"; "or"; "not";
     "in"; "like"; "is"; "null"; "between"; "order"; "by"; "asc"; "desc";
-    "limit"; "offset"; "true"; "false" ]
+    "limit"; "offset"; "true"; "false";
+    "join"; "inner"; "left"; "right"; "full"; "outer"; "cross"; "on"; "using" ]
 
 let is_alpha c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c = '_'
 let is_digit c = c >= '0' && c <= '9'
@@ -183,9 +184,8 @@ and parse_primary st =
      | TDot ->
        ignore (advance st);
        let col = ident_name st in
-       (* on ignore le qualifieur de table (une seule table dans l'incrément 1) *)
-       Ast.Col col
-     | _ -> Ast.Col name)
+       Ast.Col (Some name, col)
+     | _ -> Ast.Col (None, name))
   | _ -> err st "expression attendue"
 
 (* --- conditions --- *)
@@ -288,16 +288,48 @@ let parse_int st what =
   | TNum f -> ignore (advance st); int_of_float f
   | _ -> err st (Printf.sprintf "un nombre est attendu après %s" what)
 
+(* Référence de table : nom + alias optionnel (AS a | a). *)
+let parse_table_ref st =
+  let name = ident_name st in
+  let alias =
+    if is_kw st "as" then (ignore (advance st); Some (ident_name st))
+    else match peek st with TIdent a -> ignore (advance st); Some a | _ -> None
+  in
+  (name, alias)
+
+(* Liste de jointures : [INNER|LEFT|RIGHT|FULL [OUTER]|CROSS] JOIN t [alias] [ON cond] ; « , » = CROSS. *)
+let rec parse_joins st =
+  let comma = (peek st = TComma) in
+  let kind =
+    if comma then (ignore (advance st); Some Ast.Cross)
+    else if is_kw st "cross" then (ignore (advance st); Some Ast.Cross)
+    else if is_kw st "inner" then (ignore (advance st); Some Ast.Inner)
+    else if is_kw st "left" then (ignore (advance st); (if is_kw st "outer" then ignore (advance st)); Some Ast.Left)
+    else if is_kw st "right" then (ignore (advance st); (if is_kw st "outer" then ignore (advance st)); Some Ast.Right)
+    else if is_kw st "full" then (ignore (advance st); (if is_kw st "outer" then ignore (advance st)); Some Ast.Full)
+    else if is_kw st "join" then Some Ast.Inner
+    else None
+  in
+  match kind with
+  | None -> []
+  | Some k ->
+    if not comma then eat_kw st "join";
+    let (t, a) = parse_table_ref st in
+    let on =
+      if is_kw st "on" then (ignore (advance st); Some (parse_cond st))
+      else if is_kw st "using" then err st "USING n'est pas encore supporté — écris ON a.x = b.y"
+      else None
+    in
+    { Ast.jtable = t; jalias = a; jkind = k; jon = on } :: parse_joins st
+
 let parse_query_st st =
   if not (is_kw st "select") then err st "une requête doit commencer par SELECT";
   eat_kw st "select";
   let distinct = if is_kw st "distinct" then (ignore (advance st); true) else false in
   let sel = parse_select_list st in
   eat_kw st "from";
-  let from = ident_name st in
-  (* alias de table optionnel : ignoré (une seule table pour l'instant) *)
-  (if is_kw st "as" then (ignore (advance st); ignore (ident_name st))
-   else match peek st with TIdent _ -> ignore (advance st) | _ -> ());
+  let (from, from_alias) = parse_table_ref st in
+  let joins = parse_joins st in
   let where = if is_kw st "where" then (ignore (advance st); Some (parse_cond st)) else None in
   let order_by =
     if is_kw st "order" then (ignore (advance st); eat_kw st "by"; parse_order_by st) else []
@@ -305,7 +337,7 @@ let parse_query_st st =
   let limit = if is_kw st "limit" then (ignore (advance st); Some (parse_int st "LIMIT")) else None in
   let offset = if is_kw st "offset" then (ignore (advance st); Some (parse_int st "OFFSET")) else None in
   (match peek st with TEof -> () | _ -> err st "fin de requête attendue");
-  { Ast.distinct; sel; from; where; order_by; limit; offset }
+  { Ast.distinct; sel; from; from_alias; joins; where; order_by; limit; offset }
 
 (* Point d'entrée : renvoie Ok query | Error (message, position). *)
 let parse (input : string) : (Ast.query, string * int) result =

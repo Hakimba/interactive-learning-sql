@@ -1,12 +1,100 @@
 // État global réactif (signals).
-import { signal, computed } from "@preact/signals";
-import type { Table, Database, Result, Relation } from "./types";
+import { signal, computed, effect } from "@preact/signals";
+import type { Table, Database, Result, Relation, Val } from "./types";
+import { SCHEMAS, familyOf, type Schema } from "./catalog";
 import { runQuery } from "./engine";
 
 export const tables = signal<Table[]>([]);
 export const relations = signal<Relation[]>([]);
 export const activeTable = signal<string | null>(null);
 export const leftView = signal<"schema" | "data">("data");
+
+// --- Schémas créés par l'utilisateur (persistés dans le navigateur) ---
+const USER_SCHEMAS_KEY = "sqlsandbox.userSchemas.v1";
+
+function loadUserSchemas(): Record<string, Schema> {
+  try {
+    const raw = localStorage.getItem(USER_SCHEMAS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, Schema>) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function persist(next: Record<string, Schema>) {
+  try {
+    localStorage.setItem(USER_SCHEMAS_KEY, JSON.stringify(next));
+  } catch {
+    /* stockage indisponible (mode privé, quota) : on reste en mémoire */
+  }
+}
+
+// Schémas utilisateur, et clé du schéma en cours d'édition (null = preset ou bac à sable libre).
+export const userSchemas = signal<Record<string, Schema>>(loadUserSchemas());
+export const activeSchemaKey = signal<string | null>(null);
+
+function schemaKey(label: string): string {
+  const base =
+    "u:" +
+    (label.trim().toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "") || "schema");
+  const taken = new Set([...Object.keys(SCHEMAS), ...Object.keys(userSchemas.value)]);
+  let k = base;
+  for (let i = 2; taken.has(k); i++) k = `${base}_${i}`;
+  return k;
+}
+
+// Crée un schéma vierge nommé, l'enregistre, et vide la carte pour le construire de zéro.
+export function createSchema(label: string): string {
+  const key = schemaKey(label);
+  const schema: Schema = { label: label.trim(), tables: [], relations: [] };
+  const next = { ...userSchemas.value, [key]: schema };
+  userSchemas.value = next;
+  persist(next);
+  activeSchemaKey.value = key;
+  tables.value = [];
+  relations.value = [];
+  activeTable.value = null;
+  return key;
+}
+
+// Supprime un schéma utilisateur ; s'il était actif, on repasse en bac à sable vide.
+export function deleteSchema(key: string) {
+  const next = { ...userSchemas.value };
+  delete next[key];
+  userSchemas.value = next;
+  persist(next);
+  if (activeSchemaKey.value === key) {
+    activeSchemaKey.value = null;
+    tables.value = [];
+    relations.value = [];
+    activeTable.value = null;
+  }
+}
+
+// Tant qu'un schéma utilisateur est actif, la carte (tables + FK, hors données générées)
+// est recopiée en continu dans son enregistrement → la persistance suit la construction.
+effect(() => {
+  const key = activeSchemaKey.value;
+  const ts = tables.value;
+  const rels = relations.value;
+  if (!key) return;
+  if (!userSchemas.peek()[key]) return; // supprimé entre-temps
+  const snapshot: Schema = {
+    label: userSchemas.peek()[key].label,
+    tables: ts.map((t) => ({
+      name: t.name,
+      x: t.x,
+      y: t.y,
+      columns: t.columns.map((c) => ({ ...c })),
+      rows: [], // les données sont régénérées au chargement, comme pour les presets
+    })),
+    relations: rels.map((r) => ({ ...r })),
+  };
+  const next = { ...userSchemas.peek(), [key]: snapshot };
+  userSchemas.value = next;
+  persist(next);
+});
 
 export const sql = signal<string>("");
 export const appliedSql = signal<string | null>(null); // requête "appliquée" (projection réelle)
@@ -22,7 +110,39 @@ export function enterStep() {
   rightTab.value = "step";
 }
 
-export const database = computed<Database>(() => ({ tables: tables.value }));
+// Les cellules éditées à la main sont stockées en chaîne brute (frappe fluide, décimales OK).
+// On les coerce vers le type de la colonne UNIQUEMENT ici — seul point où la base part au moteur.
+function coerceCell(v: Val, type: string): Val {
+  if (v === null || v === undefined) return null;
+  const fam = familyOf(type);
+  if (fam === "num") {
+    if (typeof v === "number") return v;
+    const s = String(v).trim();
+    if (s === "") return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : String(v); // non numérique → laissé tel quel (le moteur signalera)
+  }
+  if (fam === "bool") {
+    if (typeof v === "boolean") return v;
+    const s = String(v).trim().toLowerCase();
+    if (s === "") return null;
+    if (s === "true" || s === "vrai" || s === "1") return true;
+    if (s === "false" || s === "faux" || s === "0") return false;
+    return String(v);
+  }
+  return typeof v === "string" ? v : String(v); // text / time / id
+}
+
+export const database = computed<Database>(() => ({
+  tables: tables.value.map((t) => ({
+    ...t,
+    rows: t.rows.map((r) => {
+      const out: Record<string, Val> = {};
+      for (const c of t.columns) out[c.name] = coerceCell(r[c.name] ?? null, c.type);
+      return out;
+    }),
+  })),
+}));
 
 // Résultat de la requête APPLIQUÉE (pour la projection et le pas-à-pas).
 export const appliedResult = computed<Result | null>(() =>

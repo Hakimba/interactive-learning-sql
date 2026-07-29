@@ -20,11 +20,15 @@ export interface Database {
   tables: Table[];
 }
 
+export type JoinType = "INNER" | "LEFT" | "RIGHT" | "FULL" | "CROSS";
+
 export interface Relation {
   fromTable: string;
   fromCol: string;
   toTable: string;
   toCol: string;
+  user?: boolean; // true = lien tiré à la main (pas une vraie FK) → pointillé + supprimable
+  jtype?: JoinType; // type de jointure choisi pour ce lien (défaut INNER)
 }
 
 export type TV = "True" | "False" | "Unknown";

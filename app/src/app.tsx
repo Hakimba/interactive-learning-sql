@@ -1,5 +1,7 @@
+import { useState } from "preact/hooks";
 import { TablesPanel } from "./components/TablesPanel";
 import { Evaluator } from "./components/Evaluator";
+import { About } from "./components/About";
 import { engineReady } from "./engine";
 
 function toggleTheme() {
@@ -9,6 +11,7 @@ function toggleTheme() {
 }
 
 export function App() {
+  const [about, setAbout] = useState(false);
   return (
     <>
       <header class="appbar">
@@ -19,7 +22,8 @@ export function App() {
         </div>
         <div class="appbar-right">
           {!engineReady() ? <span class="warn">⚠ moteur non chargé</span> : null}
-          <span class="incr">incrément 1 · SELECT / FROM / WHERE</span>
+          <span class="incr">SELECT · FROM · WHERE · JOIN</span>
+          <button class="btn ghost" onClick={() => setAbout(true)}>À propos</button>
           <button class="btn ghost" onClick={toggleTheme} title="Thème">◐</button>
         </div>
       </header>
@@ -27,6 +31,7 @@ export function App() {
         <TablesPanel />
         <Evaluator />
       </main>
+      {about ? <About onClose={() => setAbout(false)} /> : null}
     </>
   );
 }
