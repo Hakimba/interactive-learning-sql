@@ -51,7 +51,7 @@ function SchemaCreator({ onClose }: { onClose: () => void }) {
     <div class="modal-backdrop" onClick={onClose}>
       <div class="modal" onClick={(e) => e.stopPropagation()}>
         <div class="modal-head"><strong>Nouveau schéma</strong><button class="btn ghost" onClick={onClose}>✕</button></div>
-        <p class="modal-note">Un schéma vierge : la carte se vide, puis tu ajoutes des tables (+ Table) et définis les clés étrangères (champ FK à la création, ou en tirant un lien sur la map). Il est enregistré dans le navigateur et rechargeable via « Charger un schéma… ».</p>
+        <p class="modal-note">Un schéma vierge : la carte se vide, puis tu ajoutes des tables (+ Table) en déclarant leurs clés étrangères (champ FK) ; tirer un lien sur la map prépare simplement un JOIN. Il est enregistré dans le navigateur et rechargeable via « Charger un schéma… ».</p>
         <label class="field"><span>Nom</span><input autofocus value={name} placeholder="ex. ventes_2026" onInput={(e) => setName((e.target as HTMLInputElement).value)} onKeyDown={(e) => { if (e.key === "Enter") save(); }} /></label>
         {err ? <div class="modal-error">{err}</div> : null}
         <div class="modal-foot"><button class="btn ghost" onClick={onClose}>Annuler</button><button class="btn primary" onClick={save}>Créer</button></div>
@@ -91,7 +91,7 @@ function TableCreator({ onClose }: { onClose: () => void }) {
       if (!c.fk) continue;
       const dot = c.fk.indexOf(".");
       if (dot < 0) continue;
-      newRels.push({ fromTable: nm, fromCol: c.name, toTable: c.fk.slice(0, dot), toCol: c.fk.slice(dot + 1), user: true });
+      newRels.push({ fromTable: nm, fromCol: c.name, toTable: c.fk.slice(0, dot), toCol: c.fk.slice(dot + 1), user: true, fk: true });
     }
     if (newRels.length) relations.value = [...relations.value, ...newRels];
     activeTable.value = nm;
@@ -243,10 +243,12 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
     return { r, d: `M ${ax} ${ay} C ${c1} ${ay}, ${c2} ${by}, ${bx} ${by}`, ax, ay, bx, by, mx: (ax + bx) / 2, my: (ay + by) / 2 };
   }).filter((p): p is NonNullable<typeof p> => p != null);
 
-  // clic sur une relation → génère la jointure (avec son type). Ordre spatial : table la plus à gauche = FROM.
+  // clic sur une relation → génère la jointure (avec son type). Ordre spatial : table la plus à gauche = FROM,
+  // sauf si le sens a été inversé au ⇄ (flip).
   const genJoin = (r: Relation) => {
     const jt = r.jtype ?? "INNER";
-    const fromLeft = X(byName(r.fromTable)) <= X(byName(r.toTable));
+    let fromLeft = X(byName(r.fromTable)) <= X(byName(r.toTable));
+    if (r.flip) fromLeft = !fromLeft;
     const base = fromLeft ? r.fromTable : r.toTable, baseCol = fromLeft ? r.fromCol : r.toCol;
     const other = fromLeft ? r.toTable : r.fromTable, otherCol = fromLeft ? r.toCol : r.fromCol;
     if (jt === "CROSS") setSql(`SELECT * FROM ${base} CROSS JOIN ${other}`);
@@ -262,13 +264,14 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
     relations.value = relations.value.map((x) => (x === r ? updated : x));
     genJoin(updated);
   };
-  // une colonne est une FK si elle est le côté « from » d'une relation → badge FK (dérivé, pas stocké).
+  // badge FK : uniquement les relations DÉCLARÉES comme clés étrangères (pas les liens dessinés au hasard).
   const fkOf = (tname: string, col: string) =>
-    rels.find((r) => r.fromTable.toLowerCase() === tname.toLowerCase() && r.fromCol.toLowerCase() === col.toLowerCase());
-  // inverse le sens d'une relation (corrige quel côté porte la FK).
-  const swapRel = (r: Relation) => {
-    relations.value = relations.value.map((x) =>
-      x === r ? { ...x, fromTable: x.toTable, fromCol: x.toCol, toTable: x.fromTable, toCol: x.fromCol } : x);
+    rels.find((r) => r.fk && r.fromTable.toLowerCase() === tname.toLowerCase() && r.fromCol.toLowerCase() === col.toLowerCase());
+  // ⇄ : inverse le sens du JOIN généré (FROM ↔ table jointe) et réécrit la requête. Ne touche pas à la FK.
+  const flipJoin = (r: Relation) => {
+    const updated = { ...r, flip: !r.flip };
+    relations.value = relations.value.map((x) => (x === r ? updated : x));
+    genJoin(updated);
   };
 
   const startPan = (e: MouseEvent) => {
@@ -285,7 +288,7 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
           {linkPos ? <path class="rel-drag" fill="none" d={`M ${linkPos.sx} ${linkPos.sy} C ${linkPos.sx + 40} ${linkPos.sy}, ${linkPos.cx - 40} ${linkPos.cy}, ${linkPos.cx} ${linkPos.cy}`} /> : null}
           {paths.map((p) => (
             <g>
-              <path d={p.d} class={"rel" + (p.r.user ? " rel-user" : "")} fill="none" />
+              <path d={p.d} class={"rel" + (p.r.fk ? "" : " rel-user")} fill="none" />
               <circle cx={p.ax} cy={p.ay} r="3.5" class="reldot" />
               <circle cx={p.bx} cy={p.by} r="3.5" class="reldot" />
             </g>
@@ -336,12 +339,12 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
               <option value="">⋈ type…</option>
               {JOIN_TYPES.map((t) => <option value={t}>{t === "INNER" ? "JOIN (normal)" : t}</option>)}
             </select>
-            <button class="jb-swap" title={`inverser le sens de la FK (actuel : ${p.r.fromTable}.${p.r.fromCol} → ${p.r.toTable}.${p.r.toCol})`} onClick={() => swapRel(p.r)}>⇄</button>
+            <button class="jb-swap" title="inverser le sens du JOIN (échange FROM ↔ table jointe)" onClick={() => flipJoin(p.r)}>⇄</button>
             {p.r.user ? <button class="jb-del" title="supprimer ce lien ajouté" onClick={() => delRel(p.r)}>✕</button> : null}
           </div>
         ))}
       </div>
-      <div class="map-hint">définir une FK : tire un port ● d'une colonne vers une autre (ou champ FK à la création de table) · badge FK sur la colonne · menu du lien : ⋈ type de JOIN · ⇄ sens · ✕ supprimer</div>
+      <div class="map-hint">tire un port ● entre deux colonnes → lien de JOIN (pointillé) · FK déclarée (champ FK à la création de table) = trait plein + badge · menu du lien : ⋈ type · ⇄ inverser le FROM · ✕ supprimer</div>
       <div class="zoom-controls">
         <button class="btn ghost" onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(2)))}>−</button>
         <span class="zlabel">{Math.round(zoom * 100)}%</span>
