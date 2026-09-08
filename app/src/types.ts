@@ -70,6 +70,7 @@ export interface Bound { incl: boolean; v: Val } // null = non borné
 export interface Conjunct {
   text: string;
   sel: number; // sélectivité ESTIMÉE (Selinger 1979)
+  obs: number; // sélectivité OBSERVÉE sur la table (fraction exacte)
   sargable: boolean;
   column?: string;
   pred?: "eq" | "in" | "range" | "is_null" | "never";
@@ -98,11 +99,13 @@ export interface PlanPath extends Matching {
   orderProvided: "forward" | "backward" | null;
   sortNeeded: boolean;
   chosen: boolean;
-  est: PathEst;
+  est: PathEst; // à l'échelle réelle
+  estSim: PathEst | null; // à l'échelle simulée (options.scale), la table servant d'échantillon
 }
 export interface TreeNode { id: number; level: number; first: number; last: number; seps: Val[][]; children: number[] }
 export interface BTree { fanout: number; height: number; root: number; nodes: TreeNode[] }
 export interface BuiltIndex extends IndexDef {
+  heightSim: number | null; // hauteur du B-tree à l'échelle simulée
   entries: { key: Val[]; rowid: number }[]; // triées (NULL d'abord), rowid = position dans la table
   uniqueViolations: Val[][];
   tree: BTree | null;
@@ -137,12 +140,18 @@ export type Plan =
       table: string;
       consts: Consts;
       stats: Stats;
+      scale: number | null; // échelle simulée active (N lignes) ou null = réelle
+      simPages: number;
+      obsWhere: number; // fraction observée des lignes satisfaisant le WHERE entier
+      querySel: number; // sélectivité du WHERE à l'échelle active (observée, ou extrapolée si simulée)
       conjuncts: Conjunct[];
       indexes: BuiltIndex[];
       reports: (Matching & { index: string })[];
       paths: PlanPath[];
       chosen: number;
       forced: boolean;
+      curve: { sel: number; seq: number; idx: number }[]; // coût seq / index selon la sélectivité, à l'échelle active
+      curveIndex: string | null;
       exec: Exec;
       physRows: Val[][];
       physPipeline: Stage[];
@@ -159,7 +168,7 @@ export interface Ddl {
 }
 
 // Options envoyées au moteur (couche physique). Toutes facultatives.
-export interface EngineOptions { plan?: boolean; force?: string | null; consts?: Partial<Consts> }
+export interface EngineOptions { plan?: boolean; force?: string | null; consts?: Partial<Consts>; scale?: number | null }
 
 export interface Result {
   ok: boolean;

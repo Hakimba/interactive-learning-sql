@@ -44,8 +44,13 @@ let default_consts = {
   cpu_index_tuple_cost = 0.005; cpu_operator_cost = 0.0025; rows_per_page = 4; fanout = 4;
 }
 
-type options = { with_plan : bool; force : string option; consts : consts }
-let default_options = { with_plan = true; force = None; consts = default_consts }
+type options = {
+  with_plan : bool;
+  force : string option;      (* chemin forcé : "seq_scan" ou nom d'index (≈ enable_seqscan) *)
+  consts : consts;
+  scale : int option;         (* échelle SIMULÉE : « et si la table avait N lignes » ; la table réelle sert d'échantillon *)
+}
+let default_options = { with_plan = true; force = None; consts = default_consts; scale = None }
 
 (* ------------------------------------------------------------------ *)
 (* Clés : comparaison NULL d'abord, puis Value.compare_nonnull         *)
@@ -212,7 +217,11 @@ type reason =
 
 type classified = Sarg of string * col_pred | NotSarg of reason   (* string = nom de colonne *)
 
-type conjunct = { text : string; cond : Typed.tcond; cls : classified; sel : float }
+type conjunct = {
+  text : string; cond : Typed.tcond; cls : classified;
+  sel : float;   (* sélectivité ESTIMÉE (facteurs de Selinger) *)
+  obs : float;   (* sélectivité OBSERVÉE sur l'échantillon (fraction exacte des lignes qui satisfont le conjoint) *)
+}
 
 let rec conjuncts = function Typed.TAnd (a, b) -> conjuncts a @ conjuncts b | c -> [ c ]
 
@@ -577,34 +586,66 @@ type path = {
   m : matching;
   order : [ `Forward | `Backward ] option;   (* ordre d'ORDER BY fourni par le parcours *)
   sort_needed : bool;
-  est : est;
+  est : est;                (* coût à l'échelle RÉELLE de la table *)
+  est_sim : est option;     (* coût à l'échelle SIMULÉE (options.scale), la table servant d'échantillon *)
 }
 
 let index_name = function SeqScan -> "seq_scan" | IndexScan b | IndexOnlyScan b -> b.def.Db.iname
 let f2 = Printf.sprintf "%.2f"
 let f4 = Printf.sprintf "%.4g"
 
-let cost_of (c : consts) (tq : T.tquery) (s : stats) (conjs : conjunct array) (access : access) (m : matching)
-    (order : [ `Forward | `Backward ] option) : est * bool =
-  let nq = Array.length conjs in
-  let fwhere = Array.fold_left (fun acc cj -> acc *. cj.sel) 1. conjs in
-  let r = est_rows s fwhere in
+(* ---- Échelle : réelle (stats de la table) ou simulée (N lignes, mêmes fractions qu'observées) ---- *)
+type scale_ctx = { sn : float; spages : float; sheight : built -> int }
+
+let real_ctx (c : consts) (s : stats) : scale_ctx =
+  { sn = float_of_int s.n; spages = float_of_int s.pages;
+    sheight = (fun b -> (build_tree ~fanout:c.fanout b.entries).height) }
+
+(* hauteur d'un B-tree de fan-out F sur n entrées : 1 + ⌈log_F(feuilles)⌉ (Comer 1979) *)
+let sim_height (c : consts) (n : int) : int =
+  let leaves = max 1 ((n + c.fanout - 1) / c.fanout) in
+  if leaves <= 1 then 1
+  else 1 + int_of_float (Float.ceil (log (float_of_int leaves) /. log (float_of_int c.fanout) -. 1e-9))
+
+let sim_ctx (c : consts) (n : int) : scale_ctx =
+  { sn = float_of_int n; spages = float_of_int ((n + c.rows_per_page - 1) / c.rows_per_page); sheight = (fun _ -> sim_height c n) }
+
+(* Colonne unique (sans NULL) dans l'échantillon : une clé, qui reste unique à grande échelle. *)
+let unique_in_sample (s : stats) col =
+  match stat_of s col with Some st -> s.n > 0 && st.nulls = 0 && st.distinct = s.n | None -> false
+
+(* Sélectivité d'un conjoint à l'échelle simulée : fraction observée sur l'échantillon, sauf pour une
+   égalité sur une clé (1/N par valeur cherchée) et une comparaison à NULL (0). *)
+let sim_sel (s : stats) (n_sim : int) (cj : conjunct) : float =
+  let nf = float_of_int (max 1 n_sim) in
+  match cj.cls with
+  | Sarg (k, PEq _) when unique_in_sample s k -> 1. /. nf
+  | Sarg (k, PIn vs) when unique_in_sample s k -> Float.min 1. (float_of_int (List.length vs) /. nf)
+  | Sarg (_, PNever) -> 0.
+  | _ -> if s.n > 0 then cj.obs else cj.sel
+
+(* Cœur du modèle de coût (forme System R, constantes PostgreSQL), à une échelle donnée.
+   [fidx] = sélectivité de la condition d'index, [fwhere] = sélectivité du WHERE entier. *)
+let cost_core (c : consts) (tq : T.tquery) (ctx : scale_ctx) ~(nq : int) ~(fidx : float) ~(fwhere : float)
+    (access : access) (m : matching) (order : [ `Forward | `Backward ] option) : est * bool =
+  let est_rows f = if ctx.sn <= 0. then 0. else Float.max 1. (Float.round (ctx.sn *. f)) in
+  let r = est_rows fwhere in
   let sort_needed = tq.T.order_by <> [] && order = None in
   let ko = match tq.T.limit with Some l -> Some (l + (match tq.T.offset with Some o -> o | None -> 0)) | None -> None in
-  let n = float_of_int s.n and pages = float_of_int s.pages in
+  let n = ctx.sn and pages = ctx.spages in
+  let ni = int_of_float n and pi = int_of_float pages in
   let access_cost, lines =
     match access with
     | SeqScan ->
       let io = pages *. c.seq_page_cost and cpu = n *. c.cpu_tuple_cost and ops = n *. float_of_int nq *. c.cpu_operator_cost in
       (io +. cpu +. ops,
-       [ Printf.sprintf "pages × seq_page_cost = %d × %s = %s" s.pages (f4 c.seq_page_cost) (f2 io);
-         Printf.sprintf "lignes × cpu_tuple_cost = %d × %s = %s" s.n (f4 c.cpu_tuple_cost) (f2 cpu);
-         Printf.sprintf "lignes × prédicats × cpu_operator_cost = %d × %d × %s = %s" s.n nq (f4 c.cpu_operator_cost) (f2 ops) ])
+       [ Printf.sprintf "pages × seq_page_cost = %d × %s = %s" pi (f4 c.seq_page_cost) (f2 io);
+         Printf.sprintf "lignes × cpu_tuple_cost = %d × %s = %s" ni (f4 c.cpu_tuple_cost) (f2 cpu);
+         Printf.sprintf "lignes × prédicats × cpu_operator_cost = %d × %d × %s = %s" ni nq (f4 c.cpu_operator_cost) (f2 ops) ])
     | IndexScan b | IndexOnlyScan b ->
-      let fidx = List.fold_left (fun acc i -> acc *. conjs.(i).sel) 1. m.index_cond in
-      let e = if m.has_cond then est_rows s fidx else n in
-      let tree = build_tree ~fanout:c.fanout b.entries in
-      let ipages = float_of_int (tree.height - 1) +. Float.ceil (e /. float_of_int c.fanout) in
+      let e = if m.has_cond then est_rows fidx else n in
+      let height = ctx.sheight b in
+      let ipages = float_of_int (height - 1) +. Float.ceil (e /. float_of_int c.fanout) in
       let nidx = List.length m.index_cond + List.length m.index_check and nres = List.length m.residual in
       let io_idx = ipages *. c.random_page_cost in
       let cpu_idx = e *. c.cpu_index_tuple_cost +. e *. float_of_int nidx *. c.cpu_operator_cost in
@@ -613,8 +654,8 @@ let cost_of (c : consts) (tq : T.tquery) (s : stats) (conjs : conjunct array) (a
       let io_heap = if only then 0. else hpages *. c.random_page_cost in
       let cpu_heap = e *. c.cpu_tuple_cost +. e *. float_of_int nres *. c.cpu_operator_cost in
       (io_idx +. cpu_idx +. io_heap +. cpu_heap,
-       [ Printf.sprintf "entrées estimées E = %s (sélectivité %s × %d lignes)" (f4 e) (f4 (if m.has_cond then fidx else 1.)) s.n;
-         Printf.sprintf "pages d'index (hauteur−1 + ⌈E/fanout⌉) × random_page_cost = %s × %s = %s" (f4 ipages) (f4 c.random_page_cost) (f2 io_idx);
+       [ Printf.sprintf "entrées estimées E = %s (sélectivité %s × %d lignes)" (f4 e) (f4 (if m.has_cond then fidx else 1.)) ni;
+         Printf.sprintf "pages d'index (hauteur %d − 1 + ⌈E/fanout⌉) × random_page_cost = %s × %s = %s" height (f4 ipages) (f4 c.random_page_cost) (f2 io_idx);
          Printf.sprintf "E × cpu_index_tuple_cost + E × %d × cpu_operator_cost = %s" nidx (f2 cpu_idx) ]
        @ (if only then [ "Index Only Scan : aucune page du tas" ]
           else [ Printf.sprintf "pages du tas min(pages, E) × random_page_cost = %s × %s = %s" (f4 hpages) (f4 c.random_page_cost) (f2 io_heap) ])
@@ -640,15 +681,32 @@ let cost_of (c : consts) (tq : T.tquery) (s : stats) (conjs : conjunct array) (a
      formula = lines @ limit_lines @ sort_lines @ [ Printf.sprintf "total = %s" (f2 (access' +. sort_cost)) ] },
    sort_needed)
 
+let prod f l = List.fold_left (fun acc i -> acc *. f i) 1. l
+
+(* coût à l'échelle réelle (sélectivités estimées de Selinger) *)
+let cost_of (c : consts) (tq : T.tquery) (s : stats) (conjs : conjunct array) (access : access) (m : matching)
+    (order : [ `Forward | `Backward ] option) : est * bool =
+  let all = List.init (Array.length conjs) (fun i -> i) in
+  let sel i = conjs.(i).sel in
+  cost_core c tq (real_ctx c s) ~nq:(Array.length conjs) ~fidx:(prod sel m.index_cond) ~fwhere:(prod sel all) access m order
+
+(* coût à l'échelle simulée (fractions observées sur l'échantillon, clés → 1/N) *)
+let cost_sim (c : consts) (tq : T.tquery) (s : stats) (n_sim : int) (conjs : conjunct array) (access : access) (m : matching)
+    (order : [ `Forward | `Backward ] option) : est =
+  let all = List.init (Array.length conjs) (fun i -> i) in
+  let sel i = sim_sel s n_sim conjs.(i) in
+  fst (cost_core c tq (sim_ctx c n_sim) ~nq:(Array.length conjs) ~fidx:(prod sel m.index_cond) ~fwhere:(prod sel all) access m order)
+
 let empty_matching (conjs : conjunct array) : matching =
   { probes = []; has_cond = false; const_cols = []; index_cond = []; index_check = [];
     residual = List.init (Array.length conjs) (fun i -> i); not_applicable = [] }
 
-let enumerate_paths (c : consts) (tq : T.tquery) (s : stats) (enabled : built list) (conjs : conjunct array) : path list =
+let enumerate_paths ?(scale : int option) (c : consts) (tq : T.tquery) (s : stats) (enabled : built list) (conjs : conjunct array) : path list =
+  let sim access m order = Option.map (fun n -> cost_sim c tq s n conjs access m order) scale in
   let seq =
     let m = empty_matching conjs in
     let est, sort_needed = cost_of c tq s conjs SeqScan m None in
-    { access = SeqScan; m; order = None; sort_needed; est } in
+    { access = SeqScan; m; order = None; sort_needed; est; est_sim = sim SeqScan m None } in
   let idx = List.filter_map (fun b ->
     let m = match_index conjs b in
     let order = order_provided tq b ~const_cols:m.const_cols in
@@ -656,9 +714,19 @@ let enumerate_paths (c : consts) (tq : T.tquery) (s : stats) (enabled : built li
     else begin
       let access = if covering tq b then IndexOnlyScan b else IndexScan b in
       let est, sort_needed = cost_of c tq s conjs access m order in
-      Some { access; m; order; sort_needed; est }
+      Some { access; m; order; sort_needed; est; est_sim = sim access m order }
     end) enabled in
   seq :: idx
+
+(* Courbe de bascule : coût du Seq Scan et du chemin d'index [ip] selon la sélectivité s (échelle [ctx]).
+   Points log-espacés de 10⁻⁴ à 1. *)
+let curve (c : consts) (tq : T.tquery) (ctx : scale_ctx) (conjs : conjunct array) (ip : path) : (float * float * float) list =
+  let nq = Array.length conjs in
+  let pts = List.init 41 (fun i -> 10. ** (-4. +. 4. *. float_of_int i /. 40.)) in
+  List.map (fun sel ->
+    let seq, _ = cost_core c tq ctx ~nq ~fidx:sel ~fwhere:sel SeqScan (empty_matching conjs) None in
+    let idx, _ = cost_core c tq ctx ~nq ~fidx:sel ~fwhere:sel ip.access ip.m ip.order in
+    (sel, seq.total, idx.total)) pts
 
 (* ------------------------------------------------------------------ *)
 (* Exécution EXACTE du chemin choisi                                    *)
@@ -773,13 +841,19 @@ type plan_info = {
       table : Db.table;
       consts : consts;
       stats : stats;
+      scale : int option;                    (* échelle simulée active *)
+      sim_pages : int;                       (* pages à l'échelle simulée (0 si échelle réelle) *)
       conjuncts : conjunct array;
+      obs_where : float;                     (* fraction observée des lignes satisfaisant le WHERE entier *)
+      query_sel : float;                     (* sélectivité du WHERE à l'échelle ACTIVE (observée, ou extrapolée si simulée) *)
       indexes : built list;                  (* tous les index construits (actifs ou non) *)
       trees : (string * btree) list;
       reports : (string * matching) list;    (* appariement pour chaque index ACTIF (pédagogie « pourquoi pas ») *)
       paths : path list;
       chosen : int;
       forced : bool;
+      curve : (float * float * float) list;  (* (sélectivité, coût seq, coût index) à l'échelle active *)
+      curve_index : string option;           (* index de la courbe *)
       exec : exec;
       phys : Semantics.result;               (* résultat produit par le chemin physique *)
       sound : soundness;
@@ -788,9 +862,13 @@ type plan_info = {
 
 type plan = Unavailable of string | Plan of plan_info
 
+(* coût qui décide : simulé si une échelle est active, réel sinon *)
+let deciding_total (o : options) (p : path) : float =
+  match o.scale, p.est_sim with Some _, Some e -> e.total | _ -> p.est.total
+
 let choose (o : options) (paths : path list) : int * bool =
   let best = ref 0 in
-  List.iteri (fun i p -> if p.est.total < (List.nth paths !best).est.total then best := i) paths;
+  List.iteri (fun i p -> if deciding_total o p < deciding_total o (List.nth paths !best) then best := i) paths;
   match o.force with
   | Some name ->
     (match List.find_opt (fun (_, p) -> same_col (index_name p.access) name) (List.mapi (fun i p -> (i, p)) paths) with
@@ -812,17 +890,39 @@ let plan (o : options) (tq : T.tquery) ~(sem : (value list * Db.row) list) : pla
         | Error m -> (bs, ws @ [ m ])) ([], []) t.Db.indexes in
     let enabled = List.filter (fun b -> b.def.Db.ienabled) builts in
     let stats = compute_stats o.consts t enabled in
-    let conjs = Array.of_list (List.map (fun cnd -> { text = pc cnd; cond = cnd; cls = classify cnd; sel = est_sel stats cnd })
+    (* sélectivités observées : fraction exacte des lignes de l'échantillon qui satisfont chaque conjoint *)
+    let keyed = List.map (Semantics.keyed_row tq.T.base) t.Db.rows in
+    let frac cnd =
+      if keyed = [] then 0.
+      else float_of_int (List.length (List.filter (fun r -> Typed.eval_cond r cnd = True) keyed)) /. float_of_int (List.length keyed) in
+    let conjs = Array.of_list (List.map (fun cnd -> { text = pc cnd; cond = cnd; cls = classify cnd; sel = est_sel stats cnd; obs = frac cnd })
                                  (match tq.T.where with None -> [] | Some w -> conjuncts w)) in
+    let obs_where = match tq.T.where with None -> 1. | Some w -> frac w in
     let reports = List.map (fun b -> (b.def.Db.iname, match_index conjs b)) enabled in
-    let paths = enumerate_paths o.consts tq stats enabled conjs in
-    let chosen, forced = choose o paths in
+    let scale = match o.scale with Some n when n > 0 -> Some n | _ -> None in
+    let paths = enumerate_paths ?scale o.consts tq stats enabled conjs in
+    let chosen, forced = choose { o with scale } paths in
     let path = List.nth paths chosen in
     let exec, stream = execute o.consts tq t path in
     let recs, phys = Semantics.run_records ~sort:path.sort_needed tq stream in
     let exec = { exec with returned = List.length recs } in
     let sound = check tq ~sem ~phys:recs in
     let trees = List.map (fun b -> (b.def.Db.iname, build_tree ~fanout:o.consts.fanout b.entries)) builts in
-    Plan { table = t; consts = o.consts; stats; conjuncts = conjs; indexes = builts; trees; reports; paths; chosen; forced;
-           exec; phys; sound; warnings }
+    (* courbe de bascule : pour le chemin d'index choisi, sinon le meilleur chemin d'index disponible *)
+    let ctx = match scale with Some n -> sim_ctx o.consts n | None -> real_ctx o.consts stats in
+    let idx_paths = List.filter (fun p -> p.access <> SeqScan) paths in
+    let curve_path =
+      if path.access <> SeqScan then Some path
+      else List.fold_left (fun best p -> match best with
+          | None -> Some p
+          | Some b -> if deciding_total { o with scale } p < deciding_total { o with scale } b then Some p else best) None idx_paths in
+    let curve, curve_index = match curve_path with
+      | Some ip -> (curve o.consts tq ctx conjs ip, Some (index_name ip.access))
+      | None -> ([], None) in
+    let sim_pages = match scale with Some n -> (n + o.consts.rows_per_page - 1) / o.consts.rows_per_page | None -> 0 in
+    let query_sel = match scale with
+      | None -> obs_where
+      | Some n -> Array.fold_left (fun acc cj -> acc *. sim_sel stats n cj) 1. conjs in
+    Plan { table = t; consts = o.consts; stats; scale; sim_pages; conjuncts = conjs; obs_where; query_sel; indexes = builts; trees; reports;
+           paths; chosen; forced; curve; curve_index; exec; phys; sound; warnings }
   end

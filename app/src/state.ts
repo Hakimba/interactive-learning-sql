@@ -105,6 +105,7 @@ export const stepSql = signal<string>(""); // requête FIGÉE pour le pas-à-pas
 export const stepIndex = signal<number>(0);
 export const execStep = signal<number>(0); // étape courante du mini-stepper « Exécution »
 export const execForce = signal<string | null>(null); // chemin forcé (« seq_scan » ou nom d'index) ; null = choix du modèle
+export const execScale = signal<number | null>(null); // échelle SIMULÉE (« et si la table avait N lignes ») ; null = réelle. Persiste d'une requête à l'autre.
 
 // Entre dans l'onglet Pas-à-pas : on fige la requête courante (lecture seule).
 export function enterStep() {

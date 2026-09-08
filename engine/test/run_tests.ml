@@ -330,7 +330,40 @@ let golden_physical () =
   check "jointure → plan indisponible"
     (match Engine.run_plan P.default_options "SELECT * FROM clients c JOIN commandes o ON c.id = o.client_id" jdb with Ok (_, P.Unavailable _) -> true | _ -> false);
   check "unique violé → avertissement (pas d'exception)"
-    (let db = mkdb [ tbl_i "t" cols3 prows [ idx ~unique:true "u_a" [ "a" ] ] ] in match plan_of ~db "SELECT * FROM t" with Some p -> p.P.warnings <> [] | None -> false)
+    (let db = mkdb [ tbl_i "t" cols3 prows [ idx ~unique:true "u_a" [ "a" ] ] ] in match plan_of ~db "SELECT * FROM t" with Some p -> p.P.warnings <> [] | None -> false);
+  (* ---- échelle simulée : la table sert d'échantillon ---- *)
+  let plan_scale n sql = match Engine.run_plan { P.default_options with P.scale = Some n } sql pdb with Ok (_, P.Plan p) -> Some p | _ -> None in
+  check "obs : sélectivité observée exacte (a = 3 → 3/10)" (with_plan "SELECT * FROM t WHERE a = 3" (fun p -> Float.abs (p.P.conjuncts.(0).P.obs -. 0.3) < 1e-9 && Float.abs (p.P.obs_where -. 0.3) < 1e-9));
+  check "échelle : hauteur simulée (120 → 4, 10 → 2, 4 → 1, 16 → 2, 100 000 → 9)"
+    (P.sim_height P.default_consts 120 = 4 && P.sim_height P.default_consts 10 = 2 && P.sim_height P.default_consts 4 = 1 && P.sim_height P.default_consts 16 = 2
+     && P.sim_height P.default_consts 100000 = 9);
+  check "échelle : sans scale, pas d'est_sim ; avec scale, est_sim partout"
+    (with_plan "SELECT * FROM t WHERE a = 3" (fun p -> List.for_all (fun x -> x.P.est_sim = None) p.P.paths)
+     && (match plan_scale 100000 "SELECT * FROM t WHERE a = 3" with Some p -> p.P.scale = Some 100000 && List.for_all (fun x -> x.P.est_sim <> None) p.P.paths | None -> false));
+  check "échelle : a = 3 (30 % observé) à 100 000 lignes → Seq Scan reste choisi (peu sélectif)"
+    (match plan_scale 100000 "SELECT * FROM t WHERE a = 3" with Some p -> kind_of p = "seq" && not p.P.forced | None -> false);
+  check "échelle : b = 5 (10 % observé) à 100 000 lignes → est_sim rows = 10 000"
+    (match plan_scale 100000 "SELECT * FROM t WHERE b = 5" with
+     | Some p -> (match path_named p "seq_scan" with Some x -> (match x.P.est_sim with Some e -> Float.abs (e.P.rows -. 10000.) < 1. | None -> false) | None -> false)
+     | None -> false);
+  (let udb = mkdb [ tbl_i "t" cols3 (List.init 10 (fun i -> prow (VInt i) i "x")) [ idx ~unique:true "i_a" [ "a" ] ] ] in
+   let ps n sql = match Engine.run_plan { P.default_options with P.scale = Some n } sql udb with Ok (_, P.Plan p) -> Some p | _ -> None in
+   check "échelle : clé unique dans l'échantillon → 1/N à l'échelle, Index Scan choisi à 100 000 lignes (Seq Scan sur les 10 réelles)"
+     (match ps 100000 "SELECT * FROM t WHERE a = 3", plan_of ~db:udb "SELECT * FROM t WHERE a = 3" with
+      | Some p, Some q -> kind_of p = "idx:i_a" && kind_of q = "seq"
+                          && (match path_named p "i_a" with Some x -> (match x.P.est_sim with Some e -> e.P.rows = 1. | None -> false) | None -> false)
+                          && p.P.exec.P.candidates = 1 && p.P.sound.P.sound
+      | _ -> false));
+  check "échelle : courbe de bascule (41 points, coûts croissants avec la sélectivité, index moins cher aux faibles sélectivités)"
+    (match plan_scale 100000 "SELECT * FROM t WHERE a = 3" with
+     | Some p ->
+       let c = p.P.curve in
+       List.length c = 41 && p.P.curve_index = Some "i_a"
+       && (let (_, seq0, idx0) = List.hd c in idx0 < seq0)
+       && (let (_, seqN, idxN) = List.nth c 40 in idxN > seqN)
+       && (let rec mono = function (_, _, a) :: ((_, _, b) :: _ as r) -> a <= b +. 1e-9 && mono r | _ -> true in mono c)
+     | None -> false);
+  check "échelle : le chemin forcé prime sur l'échelle" (match Engine.run_plan { P.default_options with P.scale = Some 100000; P.force = Some "i_a" } "SELECT * FROM t WHERE a = 3" pdb with Ok (_, P.Plan p) -> p.P.forced && kind_of p = "idx:i_a" | _ -> false)
 
 (* ---------------- Tests DDL ---------------- *)
 let golden_ddl () =
@@ -407,17 +440,19 @@ let props_physical () =
   let arb = QCheck.make ~print:(fun (rows, idxs, sql) ->
       Printf.sprintf "%d lignes, index %s, %s" (List.length rows)
         (String.concat "/" (List.map (fun (c, e) -> String.concat "" c ^ (if e then "" else "(off)")) idxs)) sql) gen_phys in
-  (* P6 : TOUT chemin physique (forcé un par un) produit un résultat SQL valide identique au sémantique *)
-  run_prop "P6 tout chemin physique ≡ sémantique (sound, sacs / ordre / ex æquo)"
+  (* P6 : TOUT chemin physique (forcé un par un) produit un résultat SQL valide identique au sémantique.
+     L'échelle simulée (une fois sur deux) ne doit rien changer à la correction : elle n'influe que sur le CHOIX. *)
+  run_prop "P6 tout chemin physique ≡ sémantique (sound, sacs / ordre / ex æquo), avec ou sans échelle simulée"
     (QCheck.Test.make ~count:600 ~name:"sound" arb (fun (rows, idxs, sql) ->
        let db = db_phys rows idxs in
-       match Engine.run_plan P.default_options sql db with
+       let scale = if List.length rows mod 2 = 0 then Some 100000 else None in
+       match Engine.run_plan { P.default_options with P.scale = scale } sql db with
        | Error (m, _) -> QCheck.Test.fail_reportf "erreur : %s" m
        | Ok (_, P.Unavailable m) -> QCheck.Test.fail_reportf "plan indisponible : %s" m
        | Ok (_, P.Plan p) ->
          List.for_all (fun path ->
            let name = P.index_name path.P.access in
-           match Engine.run_plan { P.default_options with P.force = Some name } sql db with
+           match Engine.run_plan { P.default_options with P.force = Some name; P.scale = scale } sql db with
            | Ok (_, P.Plan q) ->
              (q.P.forced && q.P.sound.P.sound)
              || QCheck.Test.fail_reportf "non sound via %s : bag=%b keys=%b sorted=%b tie=%b" name

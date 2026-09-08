@@ -4,6 +4,7 @@
   --hairline: #2a2d38; --hairline-2: #3a3e4b;
   --accent: #3bb6a9; --accent-bg: #3bb6a91f;
   --num: #e2a63c; --pass: #37b07a; --fail: #d06a63;
+  --chart-seq: #bf8328; --chart-idx: #12a695; /* séries du graphique de coût, validées (CVD, contraste) sur fond sombre */
   --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
@@ -13,6 +14,7 @@
   --hairline: #e0e0e4; --hairline-2: #cccdd3;
   --accent: #0f766e; --accent-bg: #0f766e14;
   --num: #a8620a; --pass: #157347; --fail: #b3392f;
+  --chart-seq: #a8620a; --chart-idx: #0c8c7d; /* validées sur fond clair */
 }
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; }
@@ -399,3 +401,45 @@ table.grid.paths td, table.grid.paths th { white-space: normal; }
 .entries-wrap { max-height: 240px; overflow: auto; border: 1px solid var(--hairline); border-radius: 9px; }
 table.grid.entries tr.on td { background: color-mix(in srgb, var(--pass) 14%, transparent); }
 table.grid.entries tr.dim td { opacity: 0.45; }
+
+/* échelle simulée + courbe de bascule */
+.scale-pick { display: flex; align-items: center; gap: 6px; }
+details.card > summary { cursor: pointer; list-style: none; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary::before { content: "▸"; color: var(--ink-faint); margin-right: 6px; font-size: 11px; }
+details.card[open] > summary::before { content: "▾"; }
+details.card[open] > summary { margin-bottom: 6px; }
+.cost-chart { margin: 0; border: 1px solid var(--hairline); border-radius: 9px; background: var(--surface); padding: 8px 10px 6px; }
+.cost-chart figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--ink-soft); margin-bottom: 4px; }
+.cc-title { font-weight: 600; color: var(--ink); }
+.cc-legend { display: flex; align-items: center; gap: 6px; }
+.cc-key { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--ink-faint); vertical-align: middle; }
+.cc-key.seq { border-color: var(--chart-seq); } .cc-key.idx { border-color: var(--chart-idx); }
+.cc-svg { display: block; width: 100%; height: auto; font-family: var(--font-mono); }
+.cc-grid { stroke: var(--hairline); stroke-width: 1; }
+.cc-axis { stroke: var(--hairline-2); stroke-width: 1; }
+.cc-tick { fill: var(--ink-faint); font-size: 10px; }
+.cc-note { fill: var(--ink-soft); font-size: 10px; }
+.cc-line { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.cc-line.seq { stroke: var(--chart-seq); } .cc-line.idx { stroke: var(--chart-idx); }
+.cc-dot { stroke: var(--surface); stroke-width: 2; }
+.cc-dot.seq { fill: var(--chart-seq); } .cc-dot.idx { fill: var(--chart-idx); }
+.cc-hair { stroke: var(--ink-faint); stroke-width: 1; stroke-dasharray: 3 3; }
+.cc-cross { stroke: var(--ink-faint); stroke-width: 1; stroke-dasharray: 2 4; }
+.cc-query circle { fill: var(--ink); stroke: var(--surface); stroke-width: 2; }
+.cc-readout { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-soft); margin-top: 4px; font-family: var(--font-mono); }
+.cc-readout b { color: var(--ink); }
+
+/* comparaison sans / avec index (chiffres lisibles d'un coup d'œil) */
+.compare { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: stretch; margin: 10px 14px 0; }
+.cmp-tile { border: 1px solid var(--hairline); border-radius: 9px; background: var(--surface); padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; }
+.cmp-tile.win { border-color: var(--pass); background: color-mix(in srgb, var(--pass) 8%, transparent); }
+.cmp-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); font-family: var(--font-mono); }
+.cmp-big { font-size: 22px; font-weight: 700; font-family: var(--font-mono); color: var(--ink); line-height: 1.2; }
+.cmp-big small { font-size: 12px; font-weight: 400; color: var(--ink-soft); margin-left: 6px; }
+.cmp-sub { font-size: 12px; color: var(--ink-soft); font-family: var(--font-mono); }
+.cmp-ratio { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 96px; font-family: var(--font-mono); color: var(--pass); }
+.cmp-ratio b { font-size: 26px; line-height: 1; }
+.cmp-ratio span { font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
+.cmp-ratio.flat { color: var(--ink-faint); }
+.cmp-but { font-size: 10.5px; color: var(--num) !important; text-align: center; max-width: 150px; line-height: 1.3; }

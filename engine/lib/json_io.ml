@@ -50,6 +50,7 @@ let options_of_json (j : J.t) : Physical.options =
   let dc = d.Physical.consts in
   { Physical.with_plan = to_bool ~default:d.Physical.with_plan (member "plan" j);
     force = (match member "force" j with `String s -> Some s | _ -> None);
+    scale = (match member "scale" j with `Int n when n > 0 -> Some n | `Float f when f > 0. -> Some (int_of_float f) | _ -> None);
     consts =
       { Physical.seq_page_cost = to_float ~default:dc.Physical.seq_page_cost (member "seq_page_cost" c);
         random_page_cost = to_float ~default:dc.Physical.random_page_cost (member "random_page_cost" c);
@@ -130,7 +131,7 @@ let json_of_bound = function
   | P.Excl v -> `Assoc [ ("incl", `Bool false); ("v", json_of_value v) ]
 
 let json_of_conjunct (c : P.conjunct) : J.t =
-  let base = [ ("text", `String c.P.text); ("sel", `Float c.P.sel) ] in
+  let base = [ ("text", `String c.P.text); ("sel", `Float c.P.sel); ("obs", `Float c.P.obs) ] in
   match c.P.cls with
   | P.Sarg (col, p) ->
     let pred, extra = match p with
@@ -150,6 +151,10 @@ let json_of_matching (m : P.matching) : (string * J.t) list =
     ("indexCond", ints m.P.index_cond); ("indexCheck", ints m.P.index_check); ("residual", ints m.P.residual);
     ("notApplicable", `List (List.map (fun (i, r) -> `Assoc [ ("conjunct", `Int i); ("reason", json_of_reason r) ]) m.P.not_applicable)) ]
 
+let json_of_est (e : P.est) : J.t =
+  `Assoc [ ("rows", `Float e.P.rows); ("accessCost", `Float e.P.access_cost); ("sortCost", `Float e.P.sort_cost);
+           ("total", `Float e.P.total); ("formula", strs e.P.formula) ]
+
 let json_of_path (i : int) (chosen : int) (p : P.path) : J.t =
   let kind, idx, only = match p.P.access with
     | P.SeqScan -> ("seq_scan", `Null, false)
@@ -158,9 +163,8 @@ let json_of_path (i : int) (chosen : int) (p : P.path) : J.t =
   `Assoc ([ ("kind", `String kind); ("index", idx); ("indexOnly", `Bool only);
             ("orderProvided", match p.P.order with None -> `Null | Some `Forward -> `String "forward" | Some `Backward -> `String "backward");
             ("sortNeeded", `Bool p.P.sort_needed); ("chosen", `Bool (i = chosen));
-            ("est", `Assoc [ ("rows", `Float p.P.est.P.rows); ("accessCost", `Float p.P.est.P.access_cost);
-                             ("sortCost", `Float p.P.est.P.sort_cost); ("total", `Float p.P.est.P.total);
-                             ("formula", strs p.P.est.P.formula) ]) ]
+            ("est", json_of_est p.P.est);
+            ("estSim", match p.P.est_sim with None -> `Null | Some e -> json_of_est e) ]
           @ json_of_matching p.P.m)
 
 let json_of_tree (t : P.btree) : J.t =
@@ -169,9 +173,10 @@ let json_of_tree (t : P.btree) : J.t =
               `Assoc [ ("id", `Int n.P.id); ("level", `Int n.P.level); ("first", `Int n.P.first); ("last", `Int n.P.last);
                        ("seps", `List (List.map vals n.P.seps)); ("children", ints n.P.children) ]) t.P.nodes))) ]
 
-let json_of_built (trees : (string * P.btree) list) (b : P.built) : J.t =
+let json_of_built ?(scale : int option) (c : P.consts) (trees : (string * P.btree) list) (b : P.built) : J.t =
   `Assoc (json_of_index_def b.P.def
-          @ [ ("entries", `List (Array.to_list (Array.map (fun (e : P.entry) -> `Assoc [ ("key", vals e.P.key); ("rowid", `Int e.P.rowid) ]) b.P.entries)));
+          @ [ ("heightSim", match scale with Some n -> `Int (P.sim_height c n) | None -> `Null);
+              ("entries", `List (Array.to_list (Array.map (fun (e : P.entry) -> `Assoc [ ("key", vals e.P.key); ("rowid", `Int e.P.rowid) ]) b.P.entries)));
               ("uniqueViolations", `List (List.map vals b.P.unique_violations));
               ("tree", match List.assoc_opt b.P.def.Db.iname trees with Some t -> json_of_tree t | None -> `Null) ])
 
@@ -198,8 +203,14 @@ let plan_to_json (p : P.plan) : J.t =
       ("table", `String pl.P.table.Db.tname);
       ("consts", json_of_consts pl.P.consts);
       ("stats", json_of_stats pl.P.stats);
+      ("scale", match pl.P.scale with Some n -> `Int n | None -> `Null);
+      ("simPages", `Int pl.P.sim_pages);
+      ("obsWhere", `Float pl.P.obs_where);
+      ("querySel", `Float pl.P.query_sel);
       ("conjuncts", `List (Array.to_list (Array.map json_of_conjunct pl.P.conjuncts)));
-      ("indexes", `List (List.map (json_of_built pl.P.trees) pl.P.indexes));
+      ("indexes", `List (List.map (json_of_built ?scale:pl.P.scale pl.P.consts pl.P.trees) pl.P.indexes));
+      ("curve", `List (List.map (fun (s, a, b) -> `Assoc [ ("sel", `Float s); ("seq", `Float a); ("idx", `Float b) ]) pl.P.curve));
+      ("curveIndex", match pl.P.curve_index with Some n -> `String n | None -> `Null);
       ("reports", `List (List.map (fun (name, m) -> `Assoc (("index", `String name) :: json_of_matching m)) pl.P.reports));
       ("paths", `List (List.mapi (fun i p -> json_of_path i pl.P.chosen p) pl.P.paths));
       ("chosen", `Int pl.P.chosen); ("forced", `Bool pl.P.forced);

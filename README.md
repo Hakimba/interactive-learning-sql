@@ -54,6 +54,12 @@ externes avec NULL (Ricciotti & Cheney). Validé par différentiel vs SQLite (`d
   (entrées triées + B-tree avec la descente) ; la table vue comme un tas paginé (lignes lues / sautées) ; le filtre
   décomposé (borne l'index / vérifié dans l'index / résiduel) avec la raison quand un conjoint n'est pas *sargable* ;
   « déjà trié par l'index » et arrêt anticipé sous LIMIT ; interrupteur actif/inactif par index et « forcer » un chemin.
+- **Comparaison sans / avec index** en tête d'onglet : lignes examinées et pages lues des deux côtés, avec le rapport
+  (« ÷ 100 000 »). À l'échelle réelle, les deux chemins sont réellement exécutés ; à l'**échelle simulée**
+  (sélecteur « 1 000 … 1 000 000 lignes »), ta table sert d'échantillon : les fractions observées sont extrapolées,
+  une colonne unique reste une clé, et le chemin choisi est celui qui coûte le moins à cette échelle. Le résultat et
+  les compteurs exacts restent ceux de tes vraies lignes. Un graphique montre le coût des deux chemins selon la
+  sélectivité, avec ta requête et le point de bascule.
 - **Invariant vérifié à chaque exécution** (et par QCheck sur tous les chemins) : le chemin physique produit le même
   résultat que la sémantique — sacs égaux ; sous LIMIT, mêmes clés de tri (les ex æquo peuvent différer : SQL ne fixe
   pas leur ordre, et l'app le dit).

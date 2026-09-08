@@ -4,16 +4,24 @@
 //     constantes PostgreSQL) et compteurs EXACTS ; possibilité de FORCER un chemin (≈ enable_seqscan) ;
 //   • mini-stepper : chemin → descente d'index → lecture du tas → filtre → tri | déjà trié → LIMIT → résultat ;
 //   • « pourquoi pas cet index ? » : raison par conjoint (sargabilité, préfixe gauche…).
-import { sql, database, rightTab, execStep, execForce, tables, toggleIndex } from "../state";
+import { sql, database, rightTab, execStep, execForce, execScale, toggleIndex } from "../state";
 import { runQuery } from "../engine";
-import { generateRows } from "../datagen";
 import { bagEqual, fmtCost, fmtKey, isDdlText, pathLabel, reasonText, stepsOf, withoutIndexes } from "../exec";
-import type { Plan, PlanPath, Table, Val } from "../types";
+import type { Database, PathEst, Plan, PlanPath, Val } from "../types";
 import { Grid } from "./Grid";
 import { IndexView } from "./IndexView";
 import { HeapMap } from "./HeapMap";
+import { CostChart } from "./CostChart";
 
 type Avail = Extract<Plan, { available: true }>;
+
+// Échelles simulées proposées : la table réelle sert d'échantillon (fractions observées extrapolées).
+const SCALES = [1000, 10000, 100000, 1000000];
+const fmtN = (n: number) => n.toLocaleString("fr-FR");
+const pl = (n: number, one: string, many: string) => `${fmtN(n)} ${n === 1 ? one : many}`;
+// coût qui décide : simulé si une échelle est active, réel sinon
+const estOf = (plan: Avail, p: PlanPath): PathEst => (plan.scale && p.estSim ? p.estSim : p.est);
+const scaleLabel = (plan: Avail) => (plan.scale ? `${fmtN(plan.scale)} lignes simulées` : `${fmtN(plan.stats.rows)} lignes réelles`);
 
 function Back() {
   return <div class="lock-bar"><button class="btn ghost small" onClick={() => (rightTab.value = "editor")}>← revenir à l'éditeur</button><span>exécution physique de la requête courante</span></div>;
@@ -21,16 +29,19 @@ function Back() {
 
 function CostCard({ plan, path }: { plan: Avail; path: PlanPath }) {
   const c = plan.consts;
+  const e = estOf(plan, path);
   return (
-    <div class="card">
-      <div class="card-title">Coût estimé de <b>{pathLabel(path)}</b> <span class="tag model">modèle</span></div>
-      <ul class="formula">{path.est.formula.map((l) => <li>{l}</li>)}</ul>
+    <details class="card">
+      <summary class="card-title">Détail du coût de <b>{pathLabel(path)}</b> <span class="tag model">modèle</span> <span class="muted small">· {scaleLabel(plan)}</span></summary>
+      <ul class="formula">{e.formula.map((l) => <li>{l}</li>)}</ul>
       <div class="muted small">
         Forme System R (Selinger 1979) : coût = accès pages + CPU. Constantes PostgreSQL : seq_page_cost {c.seq_page_cost} · random_page_cost {c.random_page_cost} ·
-        cpu_tuple_cost {c.cpu_tuple_cost} · cpu_index_tuple_cost {c.cpu_index_tuple_cost} · cpu_operator_cost {c.cpu_operator_cost}.
-        Paramètres du modèle : {c.rows_per_page} lignes/page, fan-out {c.fanout}. Lignes estimées : {path.est.rows} (sélectivité Selinger) — réelles : {plan.exec.passed}.
+        cpu_tuple_cost {c.cpu_tuple_cost} · cpu_index_tuple_cost {c.cpu_index_tuple_cost} · cpu_operator_cost {c.cpu_operator_cost} · {c.rows_per_page} lignes/page · fan-out {c.fanout}.
+        {plan.scale
+          ? ` Échelle simulée : les fractions observées sur tes ${plan.stats.rows} lignes sont extrapolées à ${fmtN(plan.scale)} (une colonne unique reste une clé : 1 ligne sur N).`
+          : ` Lignes estimées : ${path.est.rows} (facteurs de Selinger) — réelles : ${plan.exec.passed}.`}
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -38,20 +49,20 @@ function PathsTable({ plan, hasOrder }: { plan: Avail; hasOrder: boolean }) {
   return (
     <div class="grid-wrap">
       <table class="grid paths">
-        <thead><tr><th></th><th>chemin</th><th>lignes est.</th><th>accès</th><th>tri</th><th>total</th><th></th></tr></thead>
+        <thead><tr><th></th><th>chemin</th><th>lignes est.</th><th>accès</th><th>tri</th><th>total <span class="muted">({plan.scale ? "simulé" : "réel"})</span></th><th></th></tr></thead>
         <tbody>
-          {plan.paths.map((p, i) => (
+          {plan.paths.map((p, i) => { const e = estOf(plan, p); return (
             <tr class={i === plan.chosen ? "row-pass" : ""}>
               <td>{i === plan.chosen ? (plan.forced ? "⚑" : "✓") : ""}</td>
               <td>{pathLabel(p)}{p.hasCond ? "" : p.kind !== "seq_scan" ? <span class="muted"> (parcours complet, pour l'ordre)</span> : null}</td>
-              <td class="num">{p.est.rows}</td>
-              <td class="num">{fmtCost(p.est.accessCost)}</td>
-              <td>{hasOrder ? (p.sortNeeded ? <span class="tag warn">tri {fmtCost(p.est.sortCost)}</span> : <span class="tag ok">déjà trié{p.orderProvided === "backward" ? " (arrière)" : ""}</span>) : <span class="muted">—</span>}</td>
-              <td class="num"><b>{fmtCost(p.est.total)}</b></td>
+              <td class="num">{fmtN(e.rows)}</td>
+              <td class="num">{fmtCost(e.accessCost)}</td>
+              <td>{hasOrder ? (p.sortNeeded ? <span class="tag warn">tri {fmtCost(e.sortCost)}</span> : <span class="tag ok">déjà trié{p.orderProvided === "backward" ? " (arrière)" : ""}</span>) : <span class="muted">—</span>}</td>
+              <td class="num"><b>{fmtCost(e.total)}</b></td>
               <td>{i !== plan.chosen ? <button class="btn ghost small" title="forcer ce chemin (≈ enable_seqscan / enable_indexscan)" onClick={() => { execForce.value = p.kind === "seq_scan" ? "seq_scan" : p.index; }}>forcer</button>
                 : plan.forced ? <button class="btn ghost small" onClick={() => (execForce.value = null)}>choix auto</button> : <span class="muted">choisi (coût min.)</span>}</td>
             </tr>
-          ))}
+          ); })}
         </tbody>
       </table>
     </div>
@@ -87,8 +98,8 @@ function WhyNot({ plan }: { plan: Avail }) {
   const others = plan.reports.filter((r) => r.index !== chosen.index);
   if (!others.length) return null;
   return (
-    <div class="card">
-      <div class="card-title">Pourquoi pas cet index ?</div>
+    <details class="card">
+      <summary class="card-title">Pourquoi pas {others.length > 1 ? "les autres index" : `l'index ${others[0].index}`} ?</summary>
       {others.map((r) => {
         const p = plan.paths.find((x) => x.index === r.index);
         return (
@@ -104,6 +115,58 @@ function WhyNot({ plan }: { plan: Avail }) {
           </div>
         );
       })}
+    </details>
+  );
+}
+
+/* Comparaison sans / avec index : le chiffre qui fait comprendre. À l'échelle réelle, les deux chemins sont
+   réellement exécutés (compteurs exacts) ; à l'échelle simulée, estimations extrapolées de l'échantillon. */
+function Compare({ plan, text, db }: { plan: Avail; text: string; db: Database }) {
+  const idxPaths = plan.paths.filter((p) => p.kind !== "seq_scan");
+  if (!idxPaths.length) {
+    return (
+      <div class="compare">
+        <div class="cmp-tile"><span class="cmp-head">sans index</span><span class="cmp-big">{fmtN(plan.scale ?? plan.stats.rows)}<small>lignes examinées</small></span><span class="cmp-sub">{fmtN(plan.scale ? plan.simPages : plan.stats.pages)} pages lues</span></div>
+        <div class="cmp-ratio flat"><b>=</b><span>pas d'index utilisable</span></div>
+        <div class="cmp-tile"><span class="cmp-head">avec index</span><span class="cmp-big">—</span><span class="cmp-sub">{plan.indexes.some((i) => i.enabled) ? "aucun index de la table ne borne cette condition" : "déclare un index sur la colonne du WHERE"}</span></div>
+      </div>
+    );
+  }
+  const best = idxPaths.reduce((b, p) => (estOf(plan, p).total < estOf(plan, b).total ? p : b), idxPaths[0]);
+  let seqRows: number, seqPages: number, idxRows: number, idxPages: number, idxIdxPages: number;
+  if (plan.scale && best.estSim) {
+    seqRows = plan.scale; seqPages = plan.simPages;
+    idxRows = best.hasCond ? best.estSim.rows : plan.scale;
+    idxPages = best.kind === "index_only_scan" ? 0 : Math.min(plan.simPages, idxRows);
+    const h = plan.indexes.find((i) => i.name === best.index)?.heightSim ?? 1;
+    idxIdxPages = h - 1 + Math.ceil(idxRows / plan.consts.fanout);
+  } else {
+    const rs = runQuery(text, db, { force: "seq_scan" }), ri = runQuery(text, db, { force: best.index });
+    const es = rs.plan?.available ? rs.plan.exec : plan.exec, ei = ri.plan?.available ? ri.plan.exec : plan.exec;
+    seqRows = es.candidates; seqPages = es.heapPages.length;
+    idxRows = ei.candidates; idxPages = ei.heapPages.length; idxIdxPages = ei.indexPages;
+  }
+  const ratio = idxRows > 0 ? seqRows / idxRows : seqRows;
+  const fmtRatio = (r: number) => (r >= 10 ? fmtN(Math.round(r)) : Math.abs(r - Math.round(r)) < 0.05 ? String(Math.round(r)) : (Math.round(r * 10) / 10).toFixed(1));
+  const win = ratio > 1.05;
+  const chosenSeq = plan.paths[plan.chosen].kind === "seq_scan";
+  return (
+    <div class="compare">
+      <div class="cmp-tile">
+        <span class="cmp-head">sans index · Seq Scan</span>
+        <span class="cmp-big">{fmtN(seqRows)}<small>{seqRows === 1 ? "ligne examinée" : "lignes examinées"}</small></span>
+        <span class="cmp-sub">{pl(seqPages, "page lue", "pages lues")}{plan.scale ? " (simulé)" : ""}</span>
+      </div>
+      <div class={"cmp-ratio" + (win ? "" : " flat")}>
+        <b>{win ? `÷ ${fmtRatio(ratio)}` : "≈"}</b>
+        <span>{win ? "fois moins de lignes" : "pas de gain ici"}</span>
+        {win && chosenSeq && !plan.forced ? <span class="cmp-but">mais accès aléatoires : le Seq Scan reste moins cher</span> : null}
+      </div>
+      <div class={"cmp-tile" + (win ? " win" : "")}>
+        <span class="cmp-head">avec {best.index} · {pathLabel(best).split(" · ")[0]}</span>
+        <span class="cmp-big">{fmtN(idxRows)}<small>{idxRows === 1 ? "ligne examinée" : "lignes examinées"}</small></span>
+        <span class="cmp-sub">{pl(idxPages, "page du tas", "pages du tas")} + {pl(idxIdxPages, "page d'index", "pages d'index")}{plan.scale ? " (simulé)" : ""}</span>
+      </div>
     </div>
   );
 }
@@ -113,12 +176,11 @@ export function ExecTab() {
   const db = database.value;
   if (!text.trim()) return <><Back /><div class="placeholder">Écris une requête dans l'éditeur, puis reviens ici pour voir comment elle s'exécute.</div></>;
   if (isDdlText(text)) return <><Back /><div class="placeholder">Un DDL (CREATE / DROP INDEX) s'applique depuis l'éditeur ; ici on observe l'exécution d'un SELECT.</div></>;
-  const r = runQuery(text, db, { force: execForce.value });
+  const r = runQuery(text, db, { force: execForce.value, scale: execScale.value });
   if (!r.ok) return <><Back /><div class="error-box"><span class="err-tag">erreur</span>{r.error}</div></>;
   const plan = r.plan;
   if (!plan || !plan.available) return <><Back /><div class="placeholder">Couche physique indisponible : {plan?.reason ?? "—"}.</div></>;
 
-  const table: Table | undefined = tables.value.find((t) => t.name.toLowerCase() === plan.table.toLowerCase());
   const dbTable = db.tables.find((t) => t.name.toLowerCase() === plan.table.toLowerCase());
   const path = plan.paths[plan.chosen];
   const ex = plan.exec;
@@ -139,11 +201,9 @@ export function ExecTab() {
   const usedIndex = ex.index ? plan.indexes.find((i) => i.name === ex.index) : undefined;
   const indexes = plan.indexes;
 
-  const gen120 = () => { if (table) tables.value = tables.value.map((t) => (t.name === table.name ? { ...t, rows: generateRows(t, 120) } : t)); };
-
   const stepNote = (() => {
     switch (cur.kind) {
-      case "path": return `${plan.paths.length} chemin(s) candidat(s) — ${plan.forced ? "chemin FORCÉ" : "le moins coûteux est choisi"} : ${pathLabel(path)}`;
+      case "path": return `${plan.paths.length} chemin(s) candidat(s) — ${plan.forced ? "chemin FORCÉ" : `le moins coûteux ${plan.scale ? `à ${fmtN(plan.scale)} lignes` : ""} est choisi`} : ${pathLabel(path)}`;
       case "descent": return `${ex.descents.length} sonde(s) · ${ex.entriesScanned} entrée(s) d'index lue(s) · ${ex.indexPages} page(s) d'index`;
       case "heap": return path.kind === "index_only_scan" ? `0 ligne du tas lue : tout vient de l'index (couvrant)` : `${ex.touched.length}/${n} ligne(s) lue(s) · ${ex.heapPages.length} page(s) du tas`;
       case "filter": return `${ex.passed}/${ex.candidates} ligne(s) lue(s) passent le WHERE`;
@@ -163,8 +223,9 @@ export function ExecTab() {
       <Back />
       <div class="proof-query"><span class="q-dim">{text}</span></div>
 
+      <Compare plan={plan} text={text} db={db} />
       <div class={"banner " + (same ? "ok" : plan.sound.tieAmbiguity ? "warn" : plan.sound.sound ? "ok" : "bad")}>
-        {same ? <><b>Résultat identique</b> avec ou sans index ({r.rows.length} ligne(s)). Seul le <b>travail</b> change : {ex.candidates} ligne(s) lue(s) ici, contre {n} en Seq Scan.</>
+        {same ? <><b>Résultat identique</b> avec ou sans index : {r.rows.length} ligne(s). Un index ne change que le <b>travail</b> pour y arriver.</>
           : plan.sound.tieAmbiguity ? <><b>Résultat équivalent</b> : mêmes clés de tri, mais des <b>ex æquo</b> différents — SQL ne fixe pas l'ordre des ex æquo, donc LIMIT dépend du chemin d'accès. Leçon : sans ORDER BY total, LIMIT n'est pas déterministe.</>
           : plan.sound.sound ? <><b>Résultat identique</b> (vérifié par le moteur).</>
           : <><b>Incohérence interne</b> : le chemin physique ne reproduit pas le résultat sémantique — c'est un bug à signaler.</>}
@@ -180,7 +241,13 @@ export function ExecTab() {
           </button>
         ))}
         <div class="spacer" />
-        {n < 60 && table ? <button class="btn ghost small" title="Sur 8 lignes, tout tient en 2 pages : le Seq Scan gagne toujours. Avec plus de lignes, l'index devient rentable." onClick={gen120}>Générer 120 lignes</button> : null}
+        <label class="scale-pick" title="Et si la table avait N lignes ? Ta table sert d'échantillon : les fractions observées sont extrapolées. Le résultat et les compteurs restent ceux de tes vraies lignes.">
+          <span class="muted">échelle</span>
+          <select class="chip chip-sel" value={String(execScale.value ?? "")} onChange={(e) => { const v = (e.target as HTMLSelectElement).value; execScale.value = v ? Number(v) : null; }}>
+            <option value="">réelle · {fmtN(n)} lignes</option>
+            {SCALES.map((k) => <option value={String(k)}>{fmtN(k)} lignes (simulé)</option>)}
+          </select>
+        </label>
       </div>
 
       <div class="step-controls">
@@ -195,8 +262,12 @@ export function ExecTab() {
       <div class="result-area exec-body">
         {cur.kind === "path" ? (<>
           <PathsTable plan={plan} hasOrder={hasOrder} />
+          {plan.curve.length && plan.curveIndex ? <CostChart curve={plan.curve} indexName={plan.curveIndex} querySel={plan.querySel} scaleLabel={scaleLabel(plan)} /> : null}
+          <div class="muted small">
+            Le Seq Scan lit toute la table en séquence ({plan.scale ? fmtN(plan.simPages) : fmtN(plan.stats.pages)} pages) ; l'Index Scan paie des accès aléatoires, {plan.consts.random_page_cost} fois plus chers, mais seulement pour les lignes candidates.
+            Il gagne quand la condition est sélective{plan.scale ? " — et plus la table est grande, plus le parcours complet coûte." : "."}{!plan.scale && n < 1000 ? " Sur une petite table tout tient en quelques pages : essaie une échelle simulée." : ""}
+          </div>
           <CostCard plan={plan} path={path} />
-          <div class="muted small">Table : {plan.stats.rows} ligne(s), {plan.stats.pages} page(s). Le Seq Scan lit tout séquentiellement (pages × seq_page_cost) ; un Index Scan paie des accès aléatoires (random_page_cost = {plan.consts.random_page_cost} × plus chers) mais n'en fait que pour les lignes candidates : il gagne quand la condition est sélective.</div>
         </>) : null}
 
         {cur.kind === "descent" && usedIndex ? (<>
@@ -206,11 +277,12 @@ export function ExecTab() {
             <ul class="conj-list small">
               {ex.descents.map((d) => <li>recherche de <code>{d.probe.length ? fmtKey(d.probe) : "(tout l'index)"}</code> → descente {d.path.join(" → ")} → entrées [{d.lo}, {d.hi}) soit {d.hi - d.lo} entrée(s)</li>)}
             </ul>
-            <div class="muted small">Chaque sonde = une descente racine → feuille (hauteur {usedIndex.tree?.height ?? "?"}) puis un parcours des feuilles dans l'intervalle : c'est le « log n » d'un B-tree (Comer 1979).</div>
+            <div class="muted small">Chaque sonde = une descente racine → feuille (hauteur {usedIndex.tree?.height ?? "?"}{plan.scale && usedIndex.heightSim ? `, et seulement ${usedIndex.heightSim} à ${fmtN(plan.scale)} lignes` : ""}) puis un parcours des feuilles dans l'intervalle : c'est le « log n » d'un B-tree (Comer 1979).</div>
           </div>
         </>) : null}
 
         {cur.kind === "heap" ? (<>
+          {plan.scale && path.estSim ? <div class="muted small">À {fmtN(plan.scale)} lignes (simulé) : {path.kind === "seq_scan" ? `${fmtN(plan.simPages)} pages lues en entier` : `≈ ${fmtN(path.estSim.rows)} ligne(s) candidate(s), soit au plus ${fmtN(Math.min(plan.simPages, path.estSim.rows))} page(s) du tas au lieu de ${fmtN(plan.simPages)}`}. Ci-dessous, la lecture réelle sur tes {fmtN(n)} lignes.</div> : null}
           <HeapMap n={n} rowsPerPage={plan.consts.rows_per_page} touched={touched} kept={kept} indexOnly={path.kind === "index_only_scan"} stream={stream} />
           <Grid columns={srcCols} rows={srcRows} rowClass={rowClass} rowPrefix={rowPrefix} />
         </>) : null}
