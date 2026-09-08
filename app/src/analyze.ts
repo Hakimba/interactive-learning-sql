@@ -52,7 +52,7 @@ export function analyze(sqlText: string, db: Database): Analysis {
     }],
   };
   const idxCol = (q: string): number[] | null => {
-    const r = runQuery(q, probeDb);
+    const r = runQuery(q, probeDb, { plan: false });
     if (!r.ok) return null;
     const j = r.columns.indexOf(IDX);
     return j < 0 ? null : r.rows.map((x) => x[j] as number);

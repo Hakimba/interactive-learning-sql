@@ -90,7 +90,7 @@ export function computeJoin(sql: string, db: Database): JoinData | null {
       : `${bt.name} ${bA} ${info.kind} JOIN ${jt.name} ${jA} ON ${info.onText}`;
 
   const idxPairs = (extra: string): [number | null, number | null][] => {
-    const r = runQuery(`SELECT ${bA}.${IDX}, ${jA}.${IDX} FROM ${fromClause} ${extra}`, probeDb);
+    const r = runQuery(`SELECT ${bA}.${IDX}, ${jA}.${IDX} FROM ${fromClause} ${extra}`, probeDb, { plan: false });
     return r.ok ? r.rows.map((row) => [row[0] as number | null, row[1] as number | null]) : [];
   };
   const pairs = idxPairs("");
@@ -122,15 +122,15 @@ export function computeJoin(sql: string, db: Database): JoinData | null {
   const keptOrdered = hasLimit ? kept0.slice(offset, limitN != null ? offset + limitN : undefined) : kept0;
   const keptSet = new Set(keptOrdered);
 
-  const combined = runQuery(`SELECT * FROM ${fromClause}`, db);
-  const collage = runQuery(sql, db);
+  const combined = runQuery(`SELECT * FROM ${fromClause}`, db, { plan: false });
+  const collage = runQuery(sql, db, { plan: false });
   // relations projetées intermédiaires : on tronque la requête avant ORDER BY / LIMIT
   const cutBefore = (keys: ("orderby" | "limit" | "offset")[]) => {
     let m = sql.length;
     for (const k of keys) { const p = seg.byKey[k]; if (p) m = Math.min(m, p.start); }
     return m;
   };
-  const rowsOf = (q: string) => { const r = runQuery(q.trim(), db); return r.ok ? r.rows : []; };
+  const rowsOf = (q: string) => { const r = runQuery(q.trim(), db, { plan: false }); return r.ok ? r.rows : []; };
   const selectRows = rowsOf(sql.slice(0, cutBefore(["orderby", "limit", "offset"]))); // WHERE + SELECT
   const orderRows = rowsOf(sql.slice(0, cutBefore(["limit", "offset"])));            // + ORDER BY
 

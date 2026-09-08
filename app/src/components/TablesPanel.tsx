@@ -3,11 +3,15 @@
 import { useState, useRef, useEffect } from "preact/hooks";
 import {
   tables, activeTable, leftView, relations, setSql, resultOnly,
-  userSchemas, activeSchemaKey, createSchema, deleteSchema,
+  userSchemas, activeSchemaKey, createSchema, deleteSchema, effectiveIndexes, toggleIndex,
 } from "../state";
 import { TYPES, SCHEMAS, familyOf, type Schema } from "../catalog";
 import { generateRows } from "../datagen";
-import type { Column, Table, Relation, JoinType, Val } from "../types";
+import { IndexEditor } from "./IndexEditor";
+import type { Column, Table, Relation, JoinType, Val, IndexDef } from "../types";
+
+// Badge IDX : la colonne appartient à un index DÉCLARÉ de la table (la PK a déjà son badge).
+const idxOf = (t: Table, col: string) => (t.indexes ?? []).find((i) => i.columns.some((c) => c.toLowerCase() === col.toLowerCase()));
 
 const W = 210, HEAD = 30, RH = 24; // dimensions fixes des cartes (pour placer les connecteurs sans mesurer le DOM)
 
@@ -60,8 +64,9 @@ function SchemaCreator({ onClose }: { onClose: () => void }) {
   );
 }
 
-// Colonne en cours d'édition : une colonne standard + une cible de clé étrangère facultative ("table.colonne").
-type DraftCol = Column & { fk?: string };
+// Colonne en cours d'édition : une colonne standard + une cible de clé étrangère facultative ("table.colonne")
+// + un drapeau « indexer » (crée un index B-tree mono-colonne idx_<table>_<col> à la création).
+type DraftCol = Column & { fk?: string; idx?: boolean };
 
 function TableCreator({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("ma_table");
@@ -81,8 +86,9 @@ function TableCreator({ onClose }: { onClose: () => void }) {
     const clean = cols.filter((c) => c.name.trim());
     if (clean.length === 0) return setErr("Ajoute au moins une colonne.");
     const k = tables.value.length;
-    const columns: Column[] = clean.map(({ fk, ...c }) => c); // on retire le champ FK transitoire
-    const t: Table = { name: nm, columns, rows: [], x: 40 + (k % 3) * 240, y: 40 + Math.floor(k / 3) * 200 };
+    const columns: Column[] = clean.map(({ fk, idx, ...c }) => c); // on retire les champs FK / IDX transitoires
+    const indexes: IndexDef[] = clean.filter((c) => c.idx && !c.pk).map((c) => ({ name: `idx_${nm}_${c.name}`, columns: [c.name], unique: false, enabled: true }));
+    const t: Table = { name: nm, columns, rows: [], x: 40 + (k % 3) * 240, y: 40 + Math.floor(k / 3) * 200, indexes };
     t.rows = generateRows(t, 8);
     tables.value = [...tables.value, t];
     // Les FK choisies → relations (source unique dessinée sur la map + génératrice de JOIN).
@@ -103,7 +109,7 @@ function TableCreator({ onClose }: { onClose: () => void }) {
       <div class="modal" onClick={(e) => e.stopPropagation()}>
         <div class="modal-head"><strong>Nouvelle table</strong><button class="btn ghost" onClick={onClose}>✕</button></div>
         <label class="field"><span>Nom</span><input value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} /></label>
-        <p class="modal-note"><b>PK</b> = clé primaire · <b>FK</b> = clé étrangère : la colonne référence une colonne d'une autre table (le lien apparaît alors sur la map).</p>
+        <p class="modal-note"><b>PK</b> = clé primaire (index unique implicite) · <b>FK</b> = clé étrangère : la colonne référence une colonne d'une autre table (le lien apparaît alors sur la map) · <b>IDX</b> = créer un index B-tree sur la colonne (visible dans l'onglet Exécution).</p>
         <div class="cols-editor">
           {cols.map((c, i) => (
             <div class="col-row">
@@ -112,6 +118,7 @@ function TableCreator({ onClose }: { onClose: () => void }) {
                 {TYPES.map((t) => <option value={t.name}>{t.name}</option>)}
               </select>
               <label class="c-pk"><input type="checkbox" checked={!!c.pk} onChange={(e) => setCol(i, { pk: (e.target as HTMLInputElement).checked })} /> PK</label>
+              <label class="c-pk" title="créer un index B-tree sur cette colonne"><input type="checkbox" checked={!!c.idx} disabled={!!c.pk} onChange={(e) => setCol(i, { idx: (e.target as HTMLInputElement).checked })} /> IDX</label>
               {fkTargets.length ? (
                 <select class="c-fk" value={c.fk ?? ""} title="Clé étrangère : cette colonne référence…" onChange={(e) => setCol(i, { fk: (e.target as HTMLSelectElement).value || undefined })}>
                   <option value="">FK → —</option>
@@ -324,10 +331,19 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
                 onMouseEnter={() => { if (drag.current?.mode === "select" && selRef.current?.table === t.name && !selRef.current.cols.includes(c.name)) setSelection({ table: t.name, cols: [...selRef.current.cols, c.name] }); }}
               >
                 <span class={"dot dot-" + familyOf(c.type)}></span>
-                <span class="nc-name">{c.name}{c.pk ? <span class="pk">PK</span> : null}{fk ? <span class="fk" title={`FK → ${fk.toTable}.${fk.toCol}`}>FK</span> : null}</span>
+                <span class="nc-name">{c.name}{c.pk ? <span class="pk">PK</span> : null}{fk ? <span class="fk" title={`FK → ${fk.toTable}.${fk.toCol}`}>FK</span> : null}{(() => { const ix = idxOf(t, c.name); return ix ? <span class={"idx" + (ix.enabled ? "" : " off")} title={`index ${ix.name} (${ix.columns.join(", ")})${ix.enabled ? "" : " — désactivé"}`}>IDX</span> : null; })()}</span>
                 <span class="nc-type">{c.type}</span>
               </div>
             );})}
+            {effectiveIndexes(t).length ? (
+              <div class="node-foot" onMouseDown={(e) => e.stopPropagation()}>
+                {effectiveIndexes(t).map((ix) => (
+                  <button class={"idx-mini" + (ix.enabled ? " on" : "")} title={`${ix.enabled ? "désactiver" : "activer"} l'index ${ix.name} (${ix.columns.join(", ")})${ix.unique ? " UNIQUE" : ""}`} onClick={() => toggleIndex(t.name, ix.name)}>
+                    {ix.enabled ? "●" : "○"} {ix.implicit ? "pkey" : ix.name.replace(new RegExp(`^idx_${t.name}_`), "")}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {t.columns.map((c, i) => (
               <span class="port" style={`top:${HEAD + i * RH + RH / 2}px`} title="tire vers une colonne pour créer une jointure" onMouseDown={(e) => startLink(e, t, c)} />
             ))}
@@ -359,6 +375,7 @@ function SchemaCanvas({ onNewTable }: { onNewTable: () => void }) {
 function DataView({ onNewTable }: { onNewTable: () => void }) {
   const ts = tables.value;
   const [count, setCount] = useState(8);
+  const [editingIdx, setEditingIdx] = useState(false);
   if (ts.length === 0)
     return (
       <div class="data-view">
@@ -402,6 +419,8 @@ function DataView({ onNewTable }: { onNewTable: () => void }) {
         <button class="btn primary" title="Remplace le contenu par des données aléatoires plausibles" onClick={() => replaceTable(active.name, (t) => ({ ...t, rows: generateRows(t, count) }))}>Générer</button>
         {active.rows.length ? <button class="btn ghost" title="Vider les lignes pour repartir d'une saisie manuelle" onClick={clearRows}>Vider</button> : null}
         <span class="tool-sep" />
+        <button class="btn" title="Déclarer / activer / supprimer des index sur cette table" onClick={() => setEditingIdx(true)}>⚡ Index{effectiveIndexes(active).length ? ` (${effectiveIndexes(active).length})` : ""}</button>
+        <span class="tool-sep" />
         <button class="btn ghost danger" title="Supprimer la table entière" onClick={() => { tables.value = ts.filter((t) => t.name !== active.name); activeTable.value = tables.value[0]?.name ?? null; }}>🗑 Table</button>
       </div>
       <div class="grid-wrap">
@@ -411,7 +430,7 @@ function DataView({ onNewTable }: { onNewTable: () => void }) {
               <th class="gutter">#</th>
               {active.columns.map((c) => (
                 <th class="th clickable" title={"insérer « " + c.name + " » dans la requête"} onClick={() => selCol(c.name, active.name)}>
-                  {c.name}{c.pk ? <span class="pk">PK</span> : null}<span class="th-type">{c.type}</span>
+                  {c.name}{c.pk ? <span class="pk">PK</span> : null}{(() => { const ix = idxOf(active, c.name); return ix ? <span class={"idx" + (ix.enabled ? "" : " off")} title={`index ${ix.name}`}>IDX</span> : null; })()}<span class="th-type">{c.type}</span>
                 </th>
               ))}
               <th class="gutter"></th>
@@ -451,6 +470,7 @@ function DataView({ onNewTable }: { onNewTable: () => void }) {
         </table>
         {active.rows.length === 0 ? <div class="grid-empty">— aucune ligne — clique « + Ligne » pour saisir, ou « Générer »</div> : null}
       </div>
+      {editingIdx ? <IndexEditor table={active} onClose={() => setEditingIdx(false)} /> : null}
     </div>
   );
 }

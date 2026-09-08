@@ -5,7 +5,12 @@ open Value
 
 type row = (string * value) list          (* n-uplet nommé *)
 type column = { cname : string; cty : string }
-type table = { tname : string; cols : column list; rows : row list }
+(* Index déclaré sur une table (couche PHYSIQUE, voir physical.ml). Ne change jamais
+   le résultat d'une requête : seulement le chemin d'accès et son coût.
+   [iimplicit] = index unique synthétisé par l'app pour la clé primaire (« <table>_pkey »). *)
+type index_def = { iname : string; icols : string list; iunique : bool; ienabled : bool; iimplicit : bool }
+
+type table = { tname : string; cols : column list; rows : row list; indexes : index_def list }
 type db = { tables : table list }
 
 let find_table (db : db) name =

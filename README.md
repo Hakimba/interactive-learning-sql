@@ -35,7 +35,37 @@ npm run dev                # ouvre http://localhost:5173
 cd engine && eval "$(opam env --switch 4.14.1)" && dune exec test/run_tests.exe
 ```
 
-## Fragment SQL couvert (incrément 1)
-`SELECT [DISTINCT] … FROM <table> [WHERE …] [ORDER BY …] [LIMIT/OFFSET]` — opérateurs
-`= <> < <= > >=`, `AND/OR/NOT`, `IN`, `LIKE`, `IS [NOT] NULL`, `BETWEEN`, arithmétique et
-fonctions scalaires. Une seule table pour l'instant (les JOIN arrivent à l'incrément 2).
+## Fragment SQL couvert
+
+**Incrément 1 — mono-table.** `SELECT [DISTINCT] … FROM <table> [WHERE …] [ORDER BY …] [LIMIT/OFFSET]` — opérateurs
+`= <> < <= > >=`, `AND/OR/NOT`, `IN`, `LIKE`, `IS [NOT] NULL`, `BETWEEN`, arithmétique et fonctions scalaires.
+
+**Incrément 2 — jointures.** `[INNER|LEFT|RIGHT|FULL|CROSS] JOIN … ON …` (et la virgule), alias de table, map de schéma
+avec clés étrangères, pas-à-pas dédié (boucle imbriquée). Sémantique : produit + ON (Guagliardo–Libkin), jointures
+externes avec NULL (Ricciotti & Cheney). Validé par différentiel vs SQLite (`difftest/diff.cjs`).
+
+**Incrément 3 — index (couche physique).** Ce que le *résultat* ne montre pas : le **chemin d'accès**.
+
+- Déclarer un index : fiche table (bouton « ⚡ Index », case IDX à la création) **ou** DDL dans l'éditeur,
+  `CREATE [UNIQUE] INDEX nom ON table (c1, c2)` / `DROP INDEX nom`, appliqué sur clic. La clé primaire est un index
+  unique implicite (`<table>_pkey`).
+- Onglet **Exécution** : chemins candidats (Seq Scan / Index Scan / Index Only Scan) avec coût *estimé* (modèle :
+  forme System R, constantes PostgreSQL) et compteurs *exacts* (lignes lues, pages, entrées d'index) ; l'index visible
+  (entrées triées + B-tree avec la descente) ; la table vue comme un tas paginé (lignes lues / sautées) ; le filtre
+  décomposé (borne l'index / vérifié dans l'index / résiduel) avec la raison quand un conjoint n'est pas *sargable* ;
+  « déjà trié par l'index » et arrêt anticipé sous LIMIT ; interrupteur actif/inactif par index et « forcer » un chemin.
+- **Invariant vérifié à chaque exécution** (et par QCheck sur tous les chemins) : le chemin physique produit le même
+  résultat que la sémantique — sacs égaux ; sous LIMIT, mêmes clés de tri (les ex æquo peuvent différer : SQL ne fixe
+  pas leur ordre, et l'app le dit).
+- Différentiel `difftest/plan.cjs` : applicabilité des index et disparition du tri comparées à `EXPLAIN QUERY PLAN`
+  de SQLite (`SEARCH … USING INDEX` vs `SCAN`, `USE TEMP B-TREE FOR ORDER BY`).
+
+Sources : Selinger et al. (SIGMOD 1979), Comer (1979), PostgreSQL chap. 11 / 14.1 / 19.7 — détail dans « À propos ».
+Mono-table pour la couche physique ; ClickHouse (index primaire clairsemé, granules) prévu en incrément suivant.
+
+## Tests différentiels (Node)
+```bash
+cd difftest && npm install        # une seule fois (sql.js)
+node diff.cjs                     # résultats vs SQLite (jointures)
+node plan.cjs                     # plan physique vs EXPLAIN QUERY PLAN (index, tri)
+```

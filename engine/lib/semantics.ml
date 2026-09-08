@@ -28,12 +28,13 @@ type result = {
 (* ---- Construction de la relation combinée ---- *)
 let source_keys (s : T.tsource) = List.map (fun c -> T.key_of s.T.alias c.Db.cname) s.T.table.Db.cols
 
-let scan_source (s : T.tsource) : Db.row list =
-  List.map (fun r ->
-    List.map (fun c ->
-      (T.key_of s.T.alias c.Db.cname, match List.assoc_opt c.Db.cname r with Some v -> v | None -> VNull))
-      s.T.table.Db.cols)
-    s.T.table.Db.rows
+(* Une ligne brute -> ligne « clés alias.col » (colonne absente = NULL). *)
+let keyed_row (s : T.tsource) (r : Db.row) : Db.row =
+  List.map (fun c ->
+    (T.key_of s.T.alias c.Db.cname, match List.assoc_opt c.Db.cname r with Some v -> v | None -> VNull))
+    s.T.table.Db.cols
+
+let scan_source (s : T.tsource) : Db.row list = List.map (keyed_row s) s.T.table.Db.rows
 
 let null_row keys : Db.row = List.map (fun k -> (k, VNull)) keys
 let eval_on on row = match on with None -> true | Some c -> Typed.eval_cond row c = True
@@ -71,23 +72,41 @@ let combine kind on (left : Db.row list) left_keys (right : Db.row list) right_k
 
 let to_pos keys (r : Db.row) = List.map (fun k -> match List.assoc_opt k r with Some v -> v | None -> VNull) keys
 
-(* ---- Exécution ---- *)
-let run (tq : T.tquery) : result =
-  (* relation combinée *)
-  let base_rows = scan_source tq.T.base in
-  let base_keys = source_keys tq.T.base in
-  let scan, all_keys =
-    List.fold_left (fun (rows, keys) (j : T.tjoin) ->
-      let right = scan_source j.T.src in
-      let rk = source_keys j.T.src in
-      (combine j.T.kind j.T.on rows keys right rk, keys @ rk))
-      (base_rows, base_keys) tq.T.joins
+(* ---- Relation combinée (FROM + jointures) ---- *)
+let all_keys (tq : T.tquery) : string list =
+  source_keys tq.T.base @ List.concat_map (fun (j : T.tjoin) -> source_keys j.T.src) tq.T.joins
+
+let scan_all (tq : T.tquery) : Db.row list =
+  fst (List.fold_left (fun (rows, keys) (j : T.tjoin) ->
+         let right = scan_source j.T.src in
+         let rk = source_keys j.T.src in
+         (combine j.T.kind j.T.on rows keys right rk, keys @ rk))
+       (scan_source tq.T.base, source_keys tq.T.base) tq.T.joins)
+
+(* Comparateur d'ORDER BY sur les enregistrements (projection, env). NULL d'abord (convention SQLite). *)
+let order_cmp (tq : T.tquery) ((_, ea) : value list * Db.row) ((_, eb) : value list * Db.row) : int =
+  let rec go = function
+    | [] -> 0
+    | (p, dir) :: rest ->
+      let va = Typed.eval_to_value ea p and vb = Typed.eval_to_value eb p in
+      let c = if is_null va && is_null vb then 0 else if is_null va then -1 else if is_null vb then 1 else compare_nonnull va vb in
+      let c = if dir = Ast.Desc then -c else c in
+      if c <> 0 then c else go rest
   in
+  go tq.T.order_by
+
+(* ---- Exécution ----
+   [run_records] déroule le pipeline WHERE → SELECT → DISTINCT → ORDER BY → LIMIT sur une relation
+   de départ DONNÉE ([scan], déjà en clés alias.col) et renvoie aussi les enregistrements finaux
+   (projection, env) — utilisés par la couche physique pour la vérification de correction.
+   [~sort:false] : le tri est sauté (l'ordre est FOURNI par le flux d'entrée, ex. parcours d'index) ;
+   l'étape ORDER BY reste tracée. *)
+let run_records ?(sort = true) (tq : T.tquery) (scan : Db.row list) : (value list * Db.row) list * result =
   let single = (tq.T.joins = []) in
-  let disp_keys = all_keys in
+  let disp_keys = all_keys tq in
   (* pour une seule table : afficher les noms de colonnes nus ; sinon "alias.col" *)
   let disp_cols =
-    if single then List.map (fun c -> c.Db.cname) tq.T.base.T.table.Db.cols else all_keys
+    if single then List.map (fun c -> c.Db.cname) tq.T.base.T.table.Db.cols else disp_keys
   in
   let pipeline = ref [] in
   let add s = pipeline := s :: !pipeline in
@@ -153,19 +172,12 @@ let run (tq : T.tquery) : result =
   (* ORDER BY *)
   let records =
     if tq.T.order_by = [] then records
-    else begin
-      let cmp (_, ea) (_, eb) =
-        let rec go = function
-          | [] -> 0
-          | (p, dir) :: rest ->
-            let va = Typed.eval_to_value ea p and vb = Typed.eval_to_value eb p in
-            let c = if is_null va && is_null vb then 0 else if is_null va then -1 else if is_null vb then 1 else compare_nonnull va vb in
-            let c = if dir = Ast.Desc then -c else c in
-            if c <> 0 then c else go rest
-        in
-        go tq.T.order_by
-      in
-      let recs = List.stable_sort cmp records in
+    else if not sort then begin
+      add { kind = "order"; label = "ORDER BY"; columns = out_cols; rows = List.map fst records;
+            note = "déjà trié (ordre fourni par l'index)"; where_rows = None };
+      records
+    end else begin
+      let recs = List.stable_sort (order_cmp tq) records in
       add { kind = "order"; label = "ORDER BY"; columns = out_cols; rows = List.map fst recs; note = "tri appliqué"; where_rows = None };
       recs
     end
@@ -188,4 +200,7 @@ let run (tq : T.tquery) : result =
       sub
   in
 
-  { ok = true; error = None; columns = out_cols; out_rows = List.map fst records; pipeline = List.rev !pipeline }
+  (records, { ok = true; error = None; columns = out_cols; out_rows = List.map fst records; pipeline = List.rev !pipeline })
+
+(* Sémantique de référence : relation combinée complète, pipeline complet. *)
+let run (tq : T.tquery) : result = snd (run_records tq (scan_all tq))

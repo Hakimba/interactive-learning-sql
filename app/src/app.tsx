@@ -22,7 +22,7 @@ export function App() {
         </div>
         <div class="appbar-right">
           {!engineReady() ? <span class="warn">⚠ moteur non chargé</span> : null}
-          <span class="incr">SELECT · FROM · WHERE · JOIN</span>
+          <span class="incr">SELECT · FROM · WHERE · JOIN · INDEX</span>
           <button class="btn ghost" onClick={() => setAbout(true)}>À propos</button>
           <button class="btn ghost" onClick={toggleTheme} title="Thème">◐</button>
         </div>

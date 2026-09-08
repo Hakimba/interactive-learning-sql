@@ -339,7 +339,47 @@ let parse_query_st st =
   (match peek st with TEof -> () | _ -> err st "fin de requête attendue");
   { Ast.distinct; sel; from; from_alias; joins; where; order_by; limit; offset }
 
-(* Point d'entrée : renvoie Ok query | Error (message, position). *)
-let parse (input : string) : (Ast.query, string * int) result =
-  try Ok (parse_query_st (mk input))
+(* --- DDL des index ---
+   « create », « unique », « index », « drop » ne sont PAS des mots-clés du lexer : une colonne peut
+   s'appeler « index ». On les reconnaît comme identifiants (insensibles à la casse) en tête d'instruction. *)
+let is_word st w = match peek st with TIdent s -> String.lowercase_ascii s = w | _ -> false
+let eat_word st w =
+  if is_word st w then ignore (advance st) else err st (Printf.sprintf "« %s » attendu" (String.uppercase_ascii w))
+
+let parse_create st =
+  eat_word st "create";
+  let unique = if is_word st "unique" then (ignore (advance st); true) else false in
+  eat_word st "index";
+  let name = ident_name st in
+  eat_kw st "on";
+  let table = ident_name st in
+  eat_lp st;
+  let cols = ref [ ident_name st ] in
+  while peek st = TComma do ignore (advance st); cols := ident_name st :: !cols done;
+  eat_rp st;
+  (match peek st with TEof -> () | _ -> err st "fin d'instruction attendue");
+  Ast.CreateIndex { iname = name; itable = table; icols = List.rev !cols; iunique = unique }
+
+let parse_drop st =
+  eat_word st "drop";
+  eat_word st "index";
+  let name = ident_name st in
+  (match peek st with TEof -> () | _ -> err st "fin d'instruction attendue");
+  Ast.DropIndex name
+
+let parse_statement_st st =
+  if is_word st "create" then Ast.Ddl (parse_create st)
+  else if is_word st "drop" then Ast.Ddl (parse_drop st)
+  else Ast.Select (parse_query_st st)
+
+(* Point d'entrée général : SELECT ou DDL. *)
+let parse_statement (input : string) : (Ast.statement, string * int) result =
+  try Ok (parse_statement_st (mk input))
   with Parse_error (msg, p) -> Error (msg, p)
+
+(* Point d'entrée « requête » : renvoie Ok query | Error (message, position). *)
+let parse (input : string) : (Ast.query, string * int) result =
+  match parse_statement input with
+  | Ok (Ast.Select q) -> Ok q
+  | Ok (Ast.Ddl _) -> Error ("instruction DDL : pas une requête SELECT", 0)
+  | Error e -> Error e

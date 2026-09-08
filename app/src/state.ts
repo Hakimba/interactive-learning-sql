@@ -1,6 +1,6 @@
 // État global réactif (signals).
 import { signal, computed, effect } from "@preact/signals";
-import type { Table, Database, Result, Relation, Val } from "./types";
+import type { Table, Database, Result, Relation, Val, IndexDef, Ddl } from "./types";
 import { SCHEMAS, familyOf, type Schema } from "./catalog";
 import { runQuery } from "./engine";
 
@@ -88,6 +88,7 @@ effect(() => {
       y: t.y,
       columns: t.columns.map((c) => ({ ...c })),
       rows: [], // les données sont régénérées au chargement, comme pour les presets
+      indexes: (t.indexes ?? []).map((i) => ({ ...i })),
     })),
     relations: rels.map((r) => ({ ...r })),
   };
@@ -98,16 +99,71 @@ effect(() => {
 
 export const sql = signal<string>("");
 export const appliedSql = signal<string | null>(null); // requête "appliquée" (projection réelle)
-export const rightTab = signal<"editor" | "step">("editor"); // onglet du panneau droit
+export const rightTab = signal<"editor" | "step" | "exec">("editor"); // onglet du panneau droit
 export const resultOnly = signal<boolean>(false); // accordion : replier l'aperçu sur le résultat
 export const stepSql = signal<string>(""); // requête FIGÉE pour le pas-à-pas (verrouillée)
 export const stepIndex = signal<number>(0);
+export const execStep = signal<number>(0); // étape courante du mini-stepper « Exécution »
+export const execForce = signal<string | null>(null); // chemin forcé (« seq_scan » ou nom d'index) ; null = choix du modèle
 
 // Entre dans l'onglet Pas-à-pas : on fige la requête courante (lecture seule).
 export function enterStep() {
   stepSql.value = sql.value;
   stepIndex.value = 0;
   rightTab.value = "step";
+}
+
+// Entre dans l'onglet Exécution (couche physique : chemins d'accès, index, coût, lignes lues).
+export function enterExec() {
+  execStep.value = 0;
+  rightTab.value = "exec";
+}
+
+/* ---------------- Index (couche physique) ---------------- */
+// La clé primaire est un index unique IMPLICITE (« <table>_pkey », comme Postgres). On le matérialise ici,
+// côté app, comme un index ordinaire ; il peut être désactivé pour l'expérience, mais pas supprimé.
+export const pkeyOff = signal<Record<string, boolean>>({});
+
+export function pkeyName(table: string) { return `${table}_pkey`; }
+
+export function effectiveIndexes(t: Table): IndexDef[] {
+  const declared = t.indexes ?? [];
+  const pkCols = t.columns.filter((c) => c.pk).map((c) => c.name);
+  if (!pkCols.length || declared.some((i) => i.name.toLowerCase() === pkeyName(t.name).toLowerCase())) return declared;
+  return [{ name: pkeyName(t.name), columns: pkCols, unique: true, enabled: !pkeyOff.value[t.name], implicit: true }, ...declared];
+}
+
+export function allIndexNames(): string[] {
+  return tables.value.flatMap((t) => effectiveIndexes(t).map((i) => i.name));
+}
+
+function updateTable(name: string, f: (t: Table) => Table) {
+  tables.value = tables.value.map((t) => (t.name.toLowerCase() === name.toLowerCase() ? f(t) : t));
+}
+
+export function addIndex(table: string, def: IndexDef) {
+  updateTable(table, (t) => ({ ...t, indexes: [...(t.indexes ?? []), { ...def, implicit: false }] }));
+}
+
+export function dropIndex(table: string, name: string) {
+  updateTable(table, (t) => ({ ...t, indexes: (t.indexes ?? []).filter((i) => i.name.toLowerCase() !== name.toLowerCase()) }));
+}
+
+export function toggleIndex(table: string, name: string) {
+  if (name.toLowerCase() === pkeyName(table).toLowerCase()) {
+    const t = tables.value.find((x) => x.name.toLowerCase() === table.toLowerCase());
+    if (t && !(t.indexes ?? []).some((i) => i.name.toLowerCase() === name.toLowerCase())) {
+      pkeyOff.value = { ...pkeyOff.value, [t.name]: !pkeyOff.value[t.name] };
+      return;
+    }
+  }
+  updateTable(table, (t) => ({ ...t, indexes: (t.indexes ?? []).map((i) => (i.name.toLowerCase() === name.toLowerCase() ? { ...i, enabled: !i.enabled } : i)) }));
+}
+
+// Applique un DDL validé par le moteur (l'app reste propriétaire de l'état ; le moteur ne fait que valider).
+export function applyDdl(d: Ddl) {
+  if (d.op === "create_index") addIndex(d.table, { ...d.index, enabled: true });
+  else dropIndex(d.table, d.index.name);
 }
 
 // Les cellules éditées à la main sont stockées en chaîne brute (frappe fluide, décimales OK).
@@ -141,6 +197,7 @@ export const database = computed<Database>(() => ({
       for (const c of t.columns) out[c.name] = coerceCell(r[c.name] ?? null, c.type);
       return out;
     }),
+    indexes: effectiveIndexes(t), // index déclarés + _pkey implicite
   })),
 }));
 
@@ -152,6 +209,8 @@ export const appliedResult = computed<Result | null>(() =>
 export function setSql(s: string) {
   sql.value = s;
   stepIndex.value = 0;
+  execStep.value = 0;
+  execForce.value = null;
 }
 
 export function apply() {

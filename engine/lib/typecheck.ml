@@ -129,6 +129,46 @@ let resolve_source db name alias_opt : tsource =
   | None -> raise (Type_error (Printf.sprintf "table inconnue : « %s »" name))
   | Some t -> { alias = (match alias_opt with Some a -> a | None -> t.Db.tname); table = t }
 
+(* ---- DDL des index ----
+   Vérifie table/colonnes/nom ; l'index lui-même est construit par la couche physique.
+   Espace de noms partagé entre index de toutes les tables et tables (comme Postgres). *)
+type ddl_result = DdlCreate of Db.table * Db.index_def | DdlDrop of Db.table * Db.index_def
+
+let all_indexes (db : Db.db) = List.concat_map (fun t -> List.map (fun i -> (t, i)) t.Db.indexes) db.Db.tables
+
+let check_ddl (d : Ast.ddl) (db : Db.db) : (ddl_result, string) result =
+  match d with
+  | Ast.CreateIndex { iname; itable; icols; iunique } ->
+    (match Db.find_table db itable with
+     | None -> Error (Printf.sprintf "table inconnue : « %s »" itable)
+     | Some t ->
+       let rec resolve acc = function
+         | [] -> Ok (List.rev acc)
+         | c :: rest ->
+           (match List.find_opt (fun col -> lc col.Db.cname = lc c) t.Db.cols with
+            | None -> Error (Printf.sprintf "colonne inconnue : « %s » dans « %s »" c t.Db.tname)
+            | Some col ->
+              if List.exists (fun x -> lc x = lc col.Db.cname) acc
+              then Error (Printf.sprintf "colonne « %s » répétée" col.Db.cname)
+              else resolve (col.Db.cname :: acc) rest)
+       in
+       (match resolve [] icols with
+        | Error e -> Error e
+        | Ok [] -> Error "au moins une colonne est attendue"
+        | Ok cols ->
+          if List.exists (fun (_, i) -> lc i.Db.iname = lc iname) (all_indexes db)
+          then Error (Printf.sprintf "« %s » existe déjà (nom d'index déjà utilisé)" iname)
+          else if List.exists (fun t -> lc t.Db.tname = lc iname) db.Db.tables
+          then Error (Printf.sprintf "« %s » est déjà le nom d'une table" iname)
+          else Ok (DdlCreate (t, { Db.iname; icols = cols; iunique; ienabled = true; iimplicit = false }))))
+  | Ast.DropIndex name ->
+    (match List.find_opt (fun (_, i) -> lc i.Db.iname = lc name) (all_indexes db) with
+     | None -> Error (Printf.sprintf "index inconnu : « %s »" name)
+     | Some (t, i) ->
+       if i.Db.iimplicit
+       then Error (Printf.sprintf "« %s » est l'index implicite de la clé primaire : décoche PK sur la colonne" name)
+       else Ok (DdlDrop (t, i)))
+
 let check (q : Ast.query) (db : Db.db) : tquery =
   let base = resolve_source db q.from q.from_alias in
   let jsrcs = List.map (fun (j : Ast.join_clause) -> (resolve_source db j.jtable j.jalias, j)) q.joins in

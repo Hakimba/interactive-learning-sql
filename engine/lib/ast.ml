@@ -51,6 +51,15 @@ type query = {
   offset : int option;
 }
 
+(* DDL des index (incrément 3). Syntaxe PostgreSQL 11.1 : CREATE [UNIQUE] INDEX nom ON table (c1, c2) ;
+   DROP INDEX nom. Un index ne change pas les résultats : il est traité par la couche physique. *)
+type ddl =
+  | CreateIndex of { iname : string; itable : string; icols : string list; iunique : bool }
+  | DropIndex of string
+
+(* Une instruction : requête SELECT ou DDL. *)
+type statement = Select of query | Ddl of ddl
+
 (* Libellé d'affichage d'une expression (nom de colonne de sortie par défaut). *)
 let rec label_of_expr = function
   | Col (_, c) -> c

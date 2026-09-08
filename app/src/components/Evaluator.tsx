@@ -3,17 +3,27 @@
 //               Bouton bascule "Afficher uniquement le résultat" = accordéon qui replie les
 //               lignes non gardées (et redéplie au re-clic). JAMAIS de projection destructive.
 //  • Pas à pas: VERROUILLÉ. Même mécanique, cumulée clause par clause (WHERE→ORDER→LIMIT→…).
-import { sql, setSql, resultOnly, rightTab, stepSql, stepIndex, enterStep, database, bindEditor, noteCursor } from "../state";
+//  • Exécution: couche PHYSIQUE (chemin d'accès, index, lignes lues, coût) — voir ExecTab.
+//  Un DDL (CREATE / DROP INDEX) tapé dans l'éditeur est validé par le moteur et appliqué sur clic seulement.
+import { sql, setSql, resultOnly, rightTab, stepSql, stepIndex, enterStep, enterExec, applyDdl, database, bindEditor, noteCursor } from "../state";
+import { runQuery } from "../engine";
 import { analyze } from "../analyze";
 import { computeJoin } from "../join";
+import { isDdlResult, isDdlText } from "../exec";
 import type { ClauseKey } from "../clauses";
 import { Grid } from "./Grid";
 import { JoinPreview } from "./JoinView";
 import { JoinStep } from "./JoinStep";
+import { ExecTab } from "./ExecTab";
 
 const JOIN_SNIPPETS: Record<string, string> = {
   JOIN: " JOIN  ON ", "LEFT JOIN": " LEFT JOIN  ON ", "RIGHT JOIN": " RIGHT JOIN  ON ",
   "FULL JOIN": " FULL JOIN  ON ", "CROSS JOIN": " CROSS JOIN ",
+};
+const INDEX_SNIPPETS: Record<string, string> = {
+  "CREATE INDEX": "CREATE INDEX idx_table_colonne ON table (colonne)",
+  "CREATE UNIQUE INDEX": "CREATE UNIQUE INDEX idx_table_colonne ON table (colonne)",
+  "DROP INDEX": "DROP INDEX idx_table_colonne",
 };
 const OP_SNIPPETS: Record<string, string> = {
   "=": " = ", "<>": " <> ", "<": " < ", "<=": " <= ", ">": " > ", ">=": " >= ",
@@ -63,7 +73,43 @@ function PreviewView() {
   );
 }
 
+/* Carte DDL : le moteur valide (table, colonnes, nom, unicité) ; l'app applique sur clic. */
+function DdlCard() {
+  const r = runQuery(sql.value, database.value, { plan: false });
+  if (!r.ok) return <div class="card ddl"><div class="card-title">DDL <span class="tag model">index</span></div><div class="error-box"><span class="err-tag">erreur</span>{r.error ?? "instruction incomplète"}</div></div>;
+  if (!isDdlResult(r) || !r.ddl) return <div class="placeholder">instruction non reconnue</div>;
+  const d = r.ddl;
+  const apply = () => {
+    applyDdl(d);
+    if (d.op === "create_index") {
+      // on enchaîne sur une requête qui exploite l'index, dans l'onglet Exécution : « crée, puis regarde »
+      const t = database.value.tables.find((x) => x.name.toLowerCase() === d.table.toLowerCase());
+      const col = d.index.columns[0];
+      const v = t?.rows.find((row) => row[col] !== null && row[col] !== undefined)?.[col];
+      const lit = v === null || v === undefined ? "NULL" : typeof v === "string" ? `'${v}'` : String(v);
+      setSql(`SELECT * FROM ${d.table} WHERE ${col} = ${lit}`);
+      enterExec();
+    } else setSql("");
+  };
+  return (
+    <div class="card ddl">
+      <div class="card-title">{d.op === "create_index" ? "Créer un index" : "Supprimer un index"} <span class="tag model">DDL</span></div>
+      <code class="ddl-summary">{d.summary}</code>
+      <p class="muted small">
+        {d.op === "create_index"
+          ? `Un index B-tree sur ${d.table}(${d.index.columns.join(", ")}) : une copie triée des clés → n° de ligne. Il ne change aucun résultat ; il change le chemin d'accès (et le coût des écritures).`
+          : "L'index disparaît : les requêtes qui l'utilisaient redeviennent des parcours complets (Seq Scan)."}
+      </p>
+      <div class="eval-actions">
+        <button class="btn primary" onClick={apply}>{d.op === "create_index" ? "Créer l'index" : "Supprimer l'index"}</button>
+        <span class="muted small">appliqué sur clic seulement, jamais à la frappe</span>
+      </div>
+    </div>
+  );
+}
+
 function EditorResults() {
+  if (isDdlText(sql.value)) return <DdlCard />;
   const jd = computeJoin(sql.value, database.value);
   if (jd) return <JoinPreview data={jd} />;
   return <PreviewView />;
@@ -88,6 +134,10 @@ function EditorTab() {
         <button class="chip" onClick={() => setSql(sql.value + " ORDER BY ")}>ORDER BY</button>
         <button class="chip" onClick={() => setSql(sql.value + " LIMIT 10")}>LIMIT</button>
         <button class="chip" onClick={() => setSql(sql.value + " OFFSET 0")}>OFFSET</button>
+        <select class="chip chip-sel" title="DDL : déclarer un index (appliqué sur clic)" onChange={(e) => { const el = e.target as HTMLSelectElement; if (el.value) setSql(INDEX_SNIPPETS[el.value]); el.value = ""; }}>
+          <option value="">INDEX ▾</option>
+          {Object.keys(INDEX_SNIPPETS).map((k) => <option value={k}>{k}</option>)}
+        </select>
       </div>
       <textarea
         class="sql-input"
@@ -104,6 +154,7 @@ function EditorTab() {
           {resultOnly.value ? "⤢ Déplier l'aperçu" : "⤡ Afficher uniquement le résultat"}
         </button>
         <button class="btn" onClick={enterStep} title="Évaluer pas à pas (verrouillé)">Pas à pas →</button>
+        <button class="btn" onClick={enterExec} title="Voir le chemin d'accès, les index, les lignes lues et le coût">Exécution →</button>
       </div>
       <div class="result-area"><EditorResults /></div>
     </>
@@ -196,9 +247,10 @@ export function Evaluator() {
         <div class="rtabs">
           <button class={"seg" + (tab === "editor" ? " active" : "")} onClick={() => (rightTab.value = "editor")}>Éditeur</button>
           <button class={"seg" + (tab === "step" ? " active" : "")} onClick={enterStep}>Pas à pas</button>
+          <button class={"seg" + (tab === "exec" ? " active" : "")} onClick={enterExec} title="couche physique : index, chemin d'accès, coût">Exécution</button>
         </div>
       </div>
-      {tab === "editor" ? <EditorTab /> : <StepTab />}
+      {tab === "editor" ? <EditorTab /> : tab === "step" ? <StepTab /> : <ExecTab />}
     </section>
   );
 }
