@@ -27,8 +27,10 @@ export interface Relation {
   fromCol: string;
   toTable: string;
   toCol: string;
-  user?: boolean; // true = lien tiré à la main (pas une vraie FK) → pointillé + supprimable
+  user?: boolean; // true = créé à la main → supprimable
+  fk?: boolean; // true = clé étrangère DÉCLARÉE (badge FK + trait plein) ; sinon simple lien de jointure (pointillé)
   jtype?: JoinType; // type de jointure choisi pour ce lien (défaut INNER)
+  flip?: boolean; // true = sens du JOIN généré inversé (FROM ↔ table jointe) — indépendant de la FK
 }
 
 export type TV = "True" | "False" | "Unknown";

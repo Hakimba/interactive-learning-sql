@@ -57,7 +57,7 @@ export const SCHEMAS: Record<string, Schema> = {
         { name: "stock", type: "INTEGER" },
       ], rows: [] },
     ],
-    relations: [{ fromTable: "commandes", fromCol: "client_id", toTable: "clients", toCol: "id" }],
+    relations: [{ fromTable: "commandes", fromCol: "client_id", toTable: "clients", toCol: "id", fk: true }],
   },
   rh: {
     label: "Ressources humaines",
